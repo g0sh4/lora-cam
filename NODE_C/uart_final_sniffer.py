@@ -1,60 +1,65 @@
 import serial
-import io
-from PIL import Image
-from datetime import datetime
+import time
 
 # --- KONFIGURACJA ---
-# Zmień na właściwy port COM dla Twojego NODE_C
+# ZMIEŃ 'COM3' na właściwy port szeregowy dla Twojego urządzenia.
+# Windows: 'COM3', 'COM4' itp. | Linux: '/dev/ttyACM0' | macOS: '/dev/tty.usbmodemXXXX'
 SERIAL_PORT = 'COM11' 
 BAUD_RATE = 115200
-# --------------------
+# --- KONIEC KONFIGURACJI ---
 
-def receive_and_save_image():
-    """
-    Główna funkcja do nasłuchiwania na porcie szeregowym,
-    odbierania i zapisywania obrazu z NODE_C.
-    """
-    print(f"Nasluchuje na porcie {SERIAL_PORT} z predkoscia {BAUD_RATE}...")
+START_MARKER = 'START_IMAGE_TRANSFER'
+
+def main():
+    print("Skrypt odbiornika obrazów uruchomiony.")
+    print(f"Oczekiwanie na połączenie na porcie {SERIAL_PORT}...")
 
     try:
-        with serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=5) as ser:
+        with serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1) as ser:
+            print("Połączono! Oczekiwanie na dane z Węzła C...")
+            
             while True:
-                line = ser.readline()
-                if line.strip() == b'START_IMAGE_TRANSFER':
-                    print("\nWykryto poczatek transferu obrazu z NODE_C!")
-                    size_line = ser.readline()
-                    try:
-                        image_size = int(size_line.strip())
-                        print(f"Oczekiwany rozmiar obrazu: {image_size} bajtow.")
-                    except (ValueError, TypeError):
-                        print(f"Blad: Nieprawidlowy format rozmiaru obrazu: {size_line}")
-                        continue
+                try:
+                    line = ser.readline().decode('utf-8', errors='ignore').strip()
 
-                    image_data = ser.read(image_size)
+                    if line == START_MARKER:
+                        print("\n[+] Wykryto marker startu transmisji obrazu!")
 
-                    if len(image_data) != image_size:
-                        print(f"Blad: Odebrano {len(image_data)}/{image_size} bajtow. Transfer niekompletny.")
-                        continue
+                        size_line = ser.readline().decode('utf-8').strip()
+                        if not size_line.isdigit():
+                            print(f"[!] Błąd: Oczekiwano rozmiaru obrazu, a otrzymano: '{size_line}'")
+                            continue
+                        
+                        image_size = int(size_line)
+                        print(f"[*] Oczekiwany rozmiar obrazu: {image_size} bajtów.")
 
-                    print("Obraz odebrany pomyslnie. Probuje zapisac...")
-                    try:
-                        image_stream = io.BytesIO(image_data)
-                        img = Image.open(image_stream)
-                        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                        filename = f"lora_image_{timestamp}.jpg"
-                        img.save(filename)
-                        print(f"Zapisano obraz jako: {filename}")
-                    except Exception as e:
-                        print(f"Blad podczas przetwarzania lub zapisywania obrazu: {e}")
-                    
-                    ser.reset_input_buffer()
+                        print(f"[*] Odbieranie danych obrazu...")
+                        image_data = ser.read(image_size)
+
+                        if len(image_data) == image_size:
+                            timestamp = time.strftime("%Y%m%d-%H%M%S")
+                            filename = f'otrzymany_obrazek_{timestamp}.jpg'
+                            
+                            with open(filename, 'wb') as f:
+                                f.write(image_data)
+                            
+                            print(f"[+] SUKCES! Obraz został zapisany do pliku: {filename}")
+                            print("\nOczekiwanie na kolejny obraz...")
+                        else:
+                            print(f"[!] BŁĄD: Otrzymano niekompletne dane! Odebrano {len(image_data)} z {image_size} bajtów.")
+
+                    elif line:
+                        print(f"[Arduino C]: {line}")
+
+                except Exception as e:
+                    # Ignorujemy pojedyncze błędy dekodowania, które mogą się zdarzyć
+                    pass
 
     except serial.SerialException as e:
-        print(f"BLAD KRYTYCZNY: Nie mozna otworzyc portu {SERIAL_PORT}.")
-        print(f"   Upewnij sie, ze jestes podlaczony do NODE_C.")
-        print(f"   Szczegoly bledu: {e}")
+        print(f"BŁĄD KRYTYCZNY: Nie można otworzyć portu {SERIAL_PORT}.")
+        print(f"Sprawdź połączenie i nazwę portu.")
     except KeyboardInterrupt:
-        print("\nZamykanie programu.")
+        print("\nProgram zatrzymany przez użytkownika.")
 
 if __name__ == '__main__':
-    receive_and_save_image()
+    main()
