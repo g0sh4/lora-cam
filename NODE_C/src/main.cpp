@@ -3,7 +3,7 @@
 #include <RadioLib.h>
 #include <vector>
 
-// Konfiguracja pinów
+// piny - NIE ZMIENIAĆ BO INACZEJ NIE DZIAŁA
 #define LORA_SCK_PIN   7
 #define LORA_MISO_PIN  8
 #define LORA_MOSI_PIN  9
@@ -12,10 +12,11 @@
 #define LORA_DIO1_PIN  39
 #define LORA_RST_PIN   42
 
-// Sprawdzona konfiguracja LoRa
 #define LORA_FREQUENCY 868.0
 #define LORA_BANDWIDTH 125.0
+
 #define LORA_SPREADING_FACTOR 7
+
 #define LORA_CODING_RATE 5
 #define LORA_SYNC_WORD 0x12
 #define LORA_PREAMBLE_LENGTH 8
@@ -111,6 +112,13 @@ void loop() {
         uint8_t packetBuffer[packetSize];
         radio.readData(packetBuffer, packetSize);
 
+        float rssi = radio.getRSSI();
+        float snr = radio.getSNR();
+        float freqError = radio.getFrequencyError();    
+        Serial.printf("[LOG],SF=%d,RSSI=%.2f,SNR=%.2f,FREQ_ERR=%.2f,PKT_NUM=%u/%u,SIZE=%d\n", 
+                  LORA_SPREADING_FACTOR, rssi, snr, freqError, receivedPacketCount, expectedPacketCount, packetSize);
+
+
         if (packetSize > 0) {
             uint8_t packetType = packetBuffer[0];
             switch (currentState) {
@@ -134,12 +142,16 @@ void loop() {
                         }
                     } else if (packetType == PACKET_TYPE_END) {
                         Serial.println("[LORA] Odebrano pakiet END.");
+                        
                         if (imageBuffer.size() == expectedImageSize) {
                             Serial.println("[LORA] SUKCES! Obraz odebrany w całości.");
-                            sendImageToComputer();
+                            Serial.println("STATUS: COMPLETE"); 
                         } else {
                             Serial.printf("[LORA] BŁĄD! Odebrano obraz niekompletny. Oczekiwano: %u, otrzymano: %lu\n", expectedImageSize, imageBuffer.size());
+                            Serial.println("STATUS: INCOMPLETE"); 
                         }
+                        sendImageToComputer();
+
                         resetReceiverState();
                     }
                     break;

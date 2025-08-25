@@ -1,12 +1,11 @@
 import serial
 import time
 
-# --- KONFIGURACJA ---
-# ZMIEŃ 'COM3' na właściwy port szeregowy dla Twojego urządzenia.
-# Windows: 'COM3', 'COM4' itp. | Linux: '/dev/ttyACM0' | macOS: '/dev/tty.usbmodemXXXX'
+# --- Konfiguracja ---
+# Windows: 'COM3', 'COM4' itp. | Linux: '/dev/ttyACM0' | macOS: '/dev/tty.usbmodemXXXX' 
 SERIAL_PORT = 'COM11' 
 BAUD_RATE = 115200
-# --- KONIEC KONFIGURACJI ---
+# --- Koniec ---
 
 START_MARKER = 'START_IMAGE_TRANSFER'
 
@@ -22,8 +21,13 @@ def main():
                 try:
                     line = ser.readline().decode('utf-8', errors='ignore').strip()
 
+                    image_status = "UNKNOWN"
+                    if line.startswith("STATUS:"):
+                        image_status = line.split(":")[1].strip()
+                        line = ser.readline().decode('utf-8', errors='ignore').strip()
+
                     if line == START_MARKER:
-                        print("\n[+] Wykryto marker startu transmisji obrazu!")
+                        print(f"\n[+] Wykryto marker startu (Status: {image_status})!")
 
                         size_line = ser.readline().decode('utf-8').strip()
                         if not size_line.isdigit():
@@ -38,7 +42,12 @@ def main():
 
                         if len(image_data) == image_size:
                             timestamp = time.strftime("%Y%m%d-%H%M%S")
-                            filename = f'otrzymany_obrazek_{timestamp}.jpg'
+                            
+                            status_suffix = ""
+                            if image_status == "INCOMPLETE" or image_status == "UNKNOWN":
+                                status_suffix = "_INCOMPLETE"
+                            
+                            filename = f'recived_img_{timestamp}{status_suffix}.jpg'
                             
                             with open(filename, 'wb') as f:
                                 f.write(image_data)
@@ -48,11 +57,10 @@ def main():
                         else:
                             print(f"[!] BŁĄD: Otrzymano niekompletne dane! Odebrano {len(image_data)} z {image_size} bajtów.")
 
-                    elif line:
+                    elif line and not line.startswith("STATUS:"):
                         print(f"[Arduino C]: {line}")
 
                 except Exception as e:
-                    # Ignorujemy pojedyncze błędy dekodowania, które mogą się zdarzyć
                     pass
 
     except serial.SerialException as e:

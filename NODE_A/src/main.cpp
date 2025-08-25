@@ -8,12 +8,17 @@
 #include <BLEUtils.h>
 #include <BLEClient.h>
 
+// --- Konfiguracja pinów ---
 constexpr uint8_t SD_CS   = 21;
 constexpr uint8_t SD_SCK  = 7;
 constexpr uint8_t SD_MISO = 8;
 constexpr uint8_t SD_MOSI = 9;
 SPIClass sdSPI(FSPI);
 
+// NOWOŚĆ: Definicja pinu przycisku
+const int buttonPin = 0; // Przycisk użytkownika na XIAO ESP32-S3 to GPIO0
+
+// --- Konfiguracja BLE ---
 #define SERVICE_UUID      "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHAR_UUID_RX      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHAR_UUID_TX      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -21,6 +26,7 @@ SPIClass sdSPI(FSPI);
 const char* NODE_B_NAME = "NODE_B";
 const size_t PAYLOAD_SIZE = 180;
 
+// --- Zmienne globalne ---
 BLEClient* pClient = nullptr;
 BLERemoteCharacteristic* pCharRx = nullptr;
 BLERemoteCharacteristic* pCharTx = nullptr;
@@ -29,6 +35,13 @@ volatile uint8_t ackValue = 0x00;
 unsigned long lastConnectAttempt = 0;
 const unsigned long CONNECT_RETRY_INTERVAL = 3000;
 
+// NOWOŚĆ: Zmienne do obsługi przycisku i debouncingu
+int buttonState = HIGH;
+int lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50; // 50 ms na stabilizację styku
+
+// --- Funkcje ---
 void notifyCB(BLERemoteCharacteristic* rc, uint8_t* data, size_t len, bool isNotify) {
   if (len > 0) { ackValue = data[0]; }
 }
@@ -64,6 +77,7 @@ void resetBLEClient() {
 }
 
 bool connectToNodeB() {
+
   BLEScan* scan = BLEDevice::getScan();
   scan->setActiveScan(true); scan->setInterval(100); scan->setWindow(99);
   BLEScanResults results = scan->start(3, false);
@@ -87,13 +101,27 @@ bool connectToNodeB() {
 
 void sendImage(const char* path) {
   File f = SD.open(path, FILE_READ);
-  if (!f) { Serial.println("[sendImage] Failed to open file"); return; }
+  if (!f) { 
+    Serial.printf("[sendImage] BŁĄD: Nie można otworzyć pliku %s!\n", path); 
+    return; 
+  }
+  
   uint32_t fileSize = f.size();
+  
+  // ZMIANA: Dodatkowe sprawdzenie, czy plik nie jest pusty
+  if (fileSize == 0) {
+    Serial.printf("[sendImage] BŁĄD: Plik %s jest pusty lub nie istnieje! Anulowanie wysyłania.\n", path);
+    f.close();
+    return;
+  }
+  
   uint16_t totalPkts = (fileSize + PAYLOAD_SIZE - 1) / PAYLOAD_SIZE;
   Serial.println("\n====================================");
-  Serial.println("[sendImage] Rozpoczynam wysyłanie obrazu");
-  Serial.printf("[sendImage] Rozmiar: %lu B, Pakiety: %u\n", fileSize, totalPkts);
+  Serial.println("[sendImage] Rozpoczynam wysyłanie obrazu z karty SD");
+  Serial.printf("[sendImage] Plik: %s, Rozmiar: %lu B, Pakiety: %u\n", path, fileSize, totalPkts);
   Serial.println("====================================");
+  
+  // ... reszta funkcji bez zmian ...
   uint8_t hdr[10] = { 0xAB, 0xCD, (uint8_t)(fileSize >> 24), (uint8_t)(fileSize >> 16), (uint8_t)(fileSize >> 8), (uint8_t)fileSize, (uint8_t)(totalPkts >> 8), (uint8_t)totalPkts, 0xEF, 0x12 };
   ackValue = 0x00;
   pCharRx->writeValue(hdr, sizeof(hdr), false);
@@ -117,15 +145,53 @@ void sendImage(const char* path) {
   ackValue = 0x00;
 }
 
+// NOWOŚĆ: Funkcja do robienia zdjęcia, zapisu i wysyłania
+// void captureAndSendImage() {
+//   Serial.println("\n[ACTION] Wykryto wciśnięcie przycisku. Uruchamiam proces foto-transmisji...");
+  
+//   // 1. Zrób zdjęcie
+//   camera_fb_t* fb = esp_camera_fb_get();
+//   if (!fb) {
+//     Serial.println("[ERROR] Nie udało się zrobić zdjęcia!");
+//     return;
+//   }
+//   Serial.printf("[CAMERA] Zrobiono zdjęcie. Rozmiar: %zu bajtów\n", fb->len);
+
+//   // 2. Zapisz zdjęcie na karcie SD
+//   const char* photoPath = "/image.jpg";
+//   // SD.remove(photoPath); // Usuń stary plik, jeśli istnieje
+//   File photoFile = SD.open(photoPath, FILE_WRITE);
+//   if (!photoFile) {
+//     Serial.println("[ERROR] Nie udało się otworzyć pliku na karcie SD do zapisu!");
+//     esp_camera_fb_return(fb); // WAŻNE: zawsze zwalniaj bufor!
+//     return;
+//   }
+//   // photoFile.write(fb->buf, fb->len);
+//   photoFile.close();
+//   // Serial.printf("[SD] Zdjęcie zapisano jako %s\n", photoPath);
+
+//   // 3. ZWOLNIJ BUFOR RAMKI - to jest absolutnie krytyczne!
+//   esp_camera_fb_return(fb);
+
+//   // 4. Wyślij zapisane zdjęcie przez BLE
+//   sendImage(photoPath);
+// }
+
 void setup() {
   Serial.begin(115200); delay(1000);
-  Serial.println("Starting Node A...");
+  Serial.println("Starting Node A (Button Trigger Version v2)...");
+
+  // NOWOŚĆ: Konfiguracja pinu przycisku
+  pinMode(buttonPin, INPUT_PULLUP);
+  Serial.println("[OK] Przycisk na pinie GPIO0 skonfigurowany.");
+
   initCamera();
   sdInit();
   initBLE();
 }
 
 void loop() {
+  // --- Zarządzanie połączeniem BLE (bez zmian) ---
   if (!pClient || !pClient->isConnected()) {
     unsigned long now = millis();
     if (now - lastConnectAttempt > CONNECT_RETRY_INTERVAL) {
@@ -136,10 +202,33 @@ void loop() {
       if (connectToNodeB()) { Serial.println("[BLE] Połączono z NODE_B!"); }
       else { Serial.println("[BLE] Nie udało się połączyć."); }
     }
-    delay(100); return;
+    delay(100); 
+    return; // Jeśli nie ma połączenia, nie sprawdzaj przycisku
   }
-  Serial.println("[SEND] Rozpoczynam transmisję obrazu");
-  sendImage("/image.jpg");
-  Serial.println("[LOOP] Czekam 120 sekund przed następną transmisją...");
-  delay(120000);
+  
+  // ZMIANA: Całkowicie nowa logika pętli oparta na przycisku
+  
+  // 1. Odczytaj stan przycisku
+  int reading = digitalRead(buttonPin);
+
+  // 2. Sprawdź, czy stan się zmienił (debouncing)
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  // 3. Po upływie czasu debouncingu, sprawdź stabilny stan
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    // Jeśli stan się ustabilizował i jest inny niż poprzednio
+    if (reading != buttonState) {
+      buttonState = reading;
+      
+      // Jeśli przycisk został wciśnięty (stan zmienił się na LOW)
+      if (buttonState == LOW) {
+        sendImage("/image.jpg");
+      }
+    }
+  }
+
+  // 4. Zapisz obecny stan do następnej iteracji
+  lastButtonState = reading;
 }

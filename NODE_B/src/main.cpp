@@ -7,7 +7,7 @@
 #include <SPI.h>
 #include <RadioLib.h>
 
-// Konfiguracja pinów
+// piny - NIE ZMIENIAĆ BO INACZEJ NIE DZIAŁA
 #define LORA_SCK_PIN   7
 #define LORA_MISO_PIN  8
 #define LORA_MOSI_PIN  9
@@ -16,10 +16,12 @@
 #define LORA_DIO1_PIN  39
 #define LORA_RST_PIN   42
 
-// Sprawdzona konfiguracja LoRa
+
 #define LORA_FREQUENCY 868.0
 #define LORA_BANDWIDTH 125.0
+
 #define LORA_SPREADING_FACTOR 7
+
 #define LORA_CODING_RATE 5
 #define LORA_TX_POWER 14
 #define LORA_SYNC_WORD 0x12
@@ -70,36 +72,52 @@ static void resetRxState() {
 void sendImageViaLoRa() {
     if (imageBuffer.empty()) { Serial.println("[LORA] Bufor obrazu pusty, anulowanie transmisji."); return; }
     
-    // Uwaga: Upewnij się, że zasilanie Węzła B jest stabilne (np. przez dodanie kondensatora 470uF-1000uF na linii zasilania).
-    // Transmisja LoRa powoduje chwilowe, duże skoki poboru prądu.
-    
+    const int guardTimeMs = 50; 
     uint32_t imageSize = imageBuffer.size();
     uint16_t totalPackets = (imageSize + LORA_DATA_CHUNK_SIZE - 1) / LORA_DATA_CHUNK_SIZE;
     Serial.printf("[LORA] Rozpoczynam transmisję obrazu do NODE_C. Rozmiar: %u bajtów, Pakiety: %u\n", imageSize, totalPackets);
+    Serial.printf("[LORA] Używany SF: %d, BW: %.1f kHz\n", LORA_SPREADING_FACTOR, LORA_BANDWIDTH);
     
     uint8_t startPacket[7];
     startPacket[0] = PACKET_TYPE_START;
     startPacket[1] = (imageSize >> 24) & 0xFF; startPacket[2] = (imageSize >> 16) & 0xFF;
     startPacket[3] = (imageSize >> 8) & 0xFF; startPacket[4] = imageSize & 0xFF;
     startPacket[5] = (totalPackets >> 8) & 0xFF; startPacket[6] = totalPackets & 0xFF;
+
+    long toaStartUs = radio.getTimeOnAir(sizeof(startPacket));
+    Serial.printf("[LORA] Wysłano pakiet START. ToA: %.2f ms\n", toaStartUs / 1000.0);
+
     radio.transmit(startPacket, sizeof(startPacket));
     Serial.println("[LORA] Wysłano pakiet START.");
-    delay(50); // Zmniejszone opóźnienie
-
+    
+    delay( (toaStartUs / 1000) + guardTimeMs );
+    static uint8_t dataPacket[LORA_PACKET_SIZE];
     for (uint16_t i = 0; i < totalPackets; ++i) {
-        uint8_t dataPacket[LORA_PACKET_SIZE];
-        dataPacket[0] = PACKET_TYPE_DATA; dataPacket[1] = (i >> 8) & 0xFF; dataPacket[2] = i & 0xFF;
+        
+        dataPacket[0] = PACKET_TYPE_DATA; 
+        dataPacket[1] = (i >> 8) & 0xFF;
+        dataPacket[2] = i & 0xFF;
+
         size_t offset = i * LORA_DATA_CHUNK_SIZE;
         size_t chunkSize = (offset + LORA_DATA_CHUNK_SIZE > imageSize) ? (imageSize - offset) : LORA_DATA_CHUNK_SIZE;
+        size_t packetLength = chunkSize + 3;
+
         memcpy(&dataPacket[3], &imageBuffer[offset], chunkSize);
-        Serial.printf("[LORA] Wysyłam pakiet danych #%u/%u\n", i + 1, totalPackets);
+
+        long toaDataUs = radio.getTimeOnAir(packetLength);
+        Serial.printf("[LORA] Wysyłam pakiet danych #%u/%u. Długość: %d B, ToA: %.2f ms\n", i + 1, totalPackets, packetLength, toaDataUs / 1000.0);
+        
         radio.transmit(dataPacket, chunkSize + 3);
-        delay(50); // Zmniejszone opóźnienie
+
+        delay( (toaDataUs / 1000) + guardTimeMs );
     }
 
     uint8_t endPacket[] = {PACKET_TYPE_END};
     radio.transmit(endPacket, sizeof(endPacket));
-    Serial.println("[LORA] Wysłano pakiet END. Transmisja zakończona.");
+    
+    long toaEndUs = radio.getTimeOnAir(sizeof(endPacket));
+    Serial.printf("[LORA] Wysłano pakiet END. ToA: %.2f ms. Transmisja zakończona.\n", toaEndUs / 1000.0);
+    
 }
 
 static bool validateHeader(const uint8_t* hdr) {
