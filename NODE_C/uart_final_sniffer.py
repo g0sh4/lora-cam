@@ -5,12 +5,12 @@ import os
 # --- Konfiguracja ---
 # Proszę zmieniać te wartości przed każdym nowym testem
 SF = "SF7"
-d = "1km"
+d = "1"
 
-# Ustawienia portu szeregowego
+# Windows: 'COM3', 'COM4' itp. | Linux: '/dev/ttyACM0' | macOS: '/dev/tty.usbmodemXXXX' 
 SERIAL_PORT = 'COM11' 
+
 BAUD_RATE = 115200
-# --- Koniec ---
 
 START_MARKER = 'START_IMAGE_TRANSFER'
 
