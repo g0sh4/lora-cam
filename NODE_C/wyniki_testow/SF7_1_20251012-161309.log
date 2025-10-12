@@ -1,0 +1,16 @@
+[16:13:09] Skrypt odbiornika obrazów uruchomiony. Logowanie do pliku: wyniki_testow\SF7_1_20251012-161309.log
+[16:13:09] Parametry testu: SF=SF7, Dystans=1
+[16:13:09] Oczekiwanie na połączenie na porcie COM11...
+[16:13:09] Połączono! Oczekiwanie na dane z Węzła C...
+[16:13:19] [Arduino C]: [LOG] ID=3, Typ=1, Seq=0, RSSI=-27.00, SNR=13.00, Size=9
+[16:13:19] [Arduino C]: [LORA] Odebrano START (Pełny Obraz). Oczekiwany rozmiar: 18949, pakiety: 75
+[16:13:30] [Arduino C]: [LOG] ID=3, Typ=5, Seq=74, RSSI=-26.00, SNR=13.50, Size=155
+[16:13:30] [Arduino C]: [LORA] Błąd sekwencji! Oczekiwano pakietu #0, a otrzymano #74. Pomijam.
+[16:13:30] [Arduino C]: [LOG] ID=3, Typ=7, Seq=0, RSSI=-29.00, SNR=12.50, Size=2
+[16:13:30] [Arduino C]: [LORA] Odebrano pakiet END.
+[16:13:30] [Arduino C]: [LORA] BŁĄD! Obraz niekompletny. Oczekiwano: 18949, otrzymano: 0
+[16:13:30] [Arduino C]: STATUS: INCOMPLETE
+[16:13:30] [Arduino C]: [PC] Błąd: Bufor obrazu pusty!
+[16:13:30] [Arduino C]: [STATE] Resetowanie stanu odbiornika LoRa. Oczekiwanie na nową transmisję...
+[16:16:07] 
+Program zatrzymany przez użytkownika.

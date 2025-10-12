@@ -7,6 +7,7 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEClient.h>
+#include "ble_frame_structure.h"
 
 // --- Konfiguracja pinów ---
 constexpr uint8_t SD_CS   = 21;
@@ -35,11 +36,10 @@ volatile uint8_t ackValue = 0x00;
 unsigned long lastConnectAttempt = 0;
 const unsigned long CONNECT_RETRY_INTERVAL = 3000;
 
-// NOWOŚĆ: Zmienne do obsługi przycisku i debouncingu
 int buttonState = HIGH;
 int lastButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
-unsigned long debounceDelay = 50; // 50 ms na stabilizację styku
+unsigned long debounceDelay = 50; 
 
 // --- Funkcje ---
 void notifyCB(BLERemoteCharacteristic* rc, uint8_t* data, size_t len, bool isNotify) {
@@ -85,7 +85,7 @@ bool connectToNodeB() {
     BLEAdvertisedDevice adv = results.getDevice(i);
     if (adv.getName() == NODE_B_NAME) {
       if (!pClient->connect(&adv)) { Serial.println("[BLE] Connection failed"); return false; }
-      pClient->setMTU(200); delay(200);
+      delay(500);pClient->setMTU(200); delay(200);
       auto svc = pClient->getService(SERVICE_UUID);
       if (!svc) { Serial.println("[BLE] Service not found"); return false; }
       pCharRx = svc->getCharacteristic(CHAR_UUID_RX);
@@ -98,7 +98,59 @@ bool connectToNodeB() {
   }
   return false;
 }
+// Plik: NODE_A/src/main.cpp
 
+void captureAndProcessImage() {
+    Serial.println("\n[ACTION] Uruchamiam proces foto-transmisji...");
+    
+    const char* filePath = "/image.jpg";
+    File f = SD.open(filePath, FILE_READ);
+    if (!f) {
+        Serial.printf("[ERROR] Nie można otworzyć pliku %s!\n", filePath);
+        return;
+    }
+
+    uint32_t fileSize = f.size();
+    if (fileSize == 0) {
+        Serial.printf("[ERROR] Plik %s jest pusty!\n", filePath);
+        f.close();
+        return;
+    }
+    
+    // ================== POCZĄTEK POPRAWKI ==================
+    // Tworzymy nagłówek BLE DOKŁADNIE tak, jak w Twoim pliku .h
+    BleHeader header;
+    header.magic_start[0] = 0xAB;
+    header.magic_start[1] = 0xCD;
+    header.tx_type = BLE_TX_TYPE_FULL_IMAGE;
+    header.data_size = fileSize;
+    header.magic_end[0] = 0xEF;
+    header.magic_end[1] = 0x12;
+    // (Brak pola total_packets)
+    // =================== KONIEC POPRAWKI ===================
+
+    // Wysyłamy nagłówek
+    pCharRx->writeValue((uint8_t*)&header, sizeof(header), false);
+    Serial.println("[BLE] Wysłano nagłówek (bez oczekiwania na ACK).");
+    
+    // Dajemy Węzłowi B chwilę na przetworzenie nagłówka
+    delay(50); 
+    
+    Serial.println("[BLE] Rozpoczynam wysyłanie danych obrazu...");
+    uint8_t buf[PAYLOAD_SIZE];
+    uint16_t totalPkts = (fileSize + PAYLOAD_SIZE - 1) / PAYLOAD_SIZE;
+
+    for (uint16_t i = 0; i < totalPkts; ++i) {
+        size_t len = f.read(buf, PAYLOAD_SIZE);
+        if (len > 0) {
+            pCharRx->writeValue(buf, len, false);
+        }
+        delay(5);
+    }
+    f.close();
+    
+    Serial.println("[BLE] Wszystkie pakiety wysłane (bez oczekiwania na finalny ACK).");
+}
 void sendImage(const char* path) {
   File f = SD.open(path, FILE_READ);
   if (!f) { 
@@ -108,7 +160,6 @@ void sendImage(const char* path) {
   
   uint32_t fileSize = f.size();
   
-  // ZMIANA: Dodatkowe sprawdzenie, czy plik nie jest pusty
   if (fileSize == 0) {
     Serial.printf("[sendImage] BŁĄD: Plik %s jest pusty lub nie istnieje! Anulowanie wysyłania.\n", path);
     f.close();
@@ -199,7 +250,10 @@ void loop() {
       Serial.println("[BLE] Utracono połączenie. Próba ponownego połączenia...");
       resetBLEClient();
       initBLE();
-      if (connectToNodeB()) { Serial.println("[BLE] Połączono z NODE_B!"); }
+      if (connectToNodeB()) { 
+        Serial.println("[BLE] Połączono z NODE_B!"); 
+        delay(500); 
+        }
       else { Serial.println("[BLE] Nie udało się połączyć."); }
     }
     delay(100); 
@@ -224,7 +278,8 @@ void loop() {
       
       // Jeśli przycisk został wciśnięty (stan zmienił się na LOW)
       if (buttonState == LOW) {
-        sendImage("/image.jpg");
+        // sendImage("/image.jpg");
+        captureAndProcessImage();
       }
     }
   }

@@ -6,7 +6,7 @@ from datetime import datetime
 # --- KONFIGURACJA ---
 # Zmień na właściwy port COM dla Twojego ESP32 (np. 'COM3' w Windows,
 # '/dev/tty.usbserial-XXXX' na macOS lub '/dev/ttyUSB0' na Linux)
-SERIAL_PORT = 'COM10'
+SERIAL_PORT = 'COM11'
 BAUD_RATE = 115200
 # --------------------
 

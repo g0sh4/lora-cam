@@ -7,17 +7,20 @@
 #include <SPI.h>
 #include <RadioLib.h>
 
+#include "frame_structure.h"
+#include "ble_frame_structure.h"
+
 // piny - NIE ZMIENIAĆ BO INACZEJ NIE DZIAŁA
-#define LORA_SCK_PIN   7
-#define LORA_MISO_PIN  8
-#define LORA_MOSI_PIN  9
-#define LORA_NSS_PIN   41
-#define LORA_BUSY_PIN  40
-#define LORA_DIO1_PIN  39
-#define LORA_RST_PIN   42
+#define LORA_SCK_PIN 7
+#define LORA_MISO_PIN 8
+#define LORA_MOSI_PIN 9
+#define LORA_NSS_PIN 41
+#define LORA_BUSY_PIN 40
+#define LORA_DIO1_PIN 39
+#define LORA_RST_PIN 42
 
 // --- GŁÓWNY PARAMETR DO ZMIANY PODCZAS TESTÓW ---
-#define LORA_SPREADING_FACTOR 9
+#define LORA_SPREADING_FACTOR 7
 
 // --- Pozostała konfiguracja LoRa ---
 #define LORA_FREQUENCY 868.0
@@ -27,153 +30,171 @@
 #define LORA_SYNC_WORD 0x12
 #define LORA_PREAMLE_LENGTH 8
 
-// Definicje protokołu LoRa
-#define PACKET_TYPE_START 0xA1
-#define PACKET_TYPE_DATA  0xB1
-#define PACKET_TYPE_END   0xC1
-#define LORA_PACKET_SIZE 250
-#define LORA_DATA_CHUNK_SIZE (LORA_PACKET_SIZE - 3) 
+#define LORA_PACKET_SIZE 250 // Maksymalny rozmiar pakietu dla SX1262
 
+// Inicjalizacja modułu LoRa
 Module mod(LORA_NSS_PIN, LORA_DIO1_PIN, LORA_RST_PIN, LORA_BUSY_PIN);
 SX1262 radio(&mod);
 
 // Definicje BLE
-#define SERVICE_UUID      "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHAR_UUID_RX      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHAR_UUID_TX      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHAR_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHAR_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 // Stany i zmienne globalne
-enum RxPhase { WAITING_FOR_HEADER, RECEIVING_DATA, TRANSMISSION_COMPLETE };
+enum RxPhase {
+  WAITING_FOR_HEADER,
+  RECEIVING_DATA,
+  TRANSMISSION_COMPLETE
+};
 struct RxState {
-  RxPhase  phase = WAITING_FOR_HEADER;
+  RxPhase phase = WAITING_FOR_HEADER;
   uint32_t fileSize = 0, bytesRemaining = 0;
-  uint16_t totalPkts = 0, receivedPkts = 0;
-  uint8_t  hdrBuf[10];
-  size_t   hdrGot = 0;
+  uint8_t hdrBuf[sizeof(BleHeader)];
+  size_t hdrGot = 0;
   unsigned long lastActivity = 0;
 } rx;
 
 std::vector<uint8_t> imageBuffer;
-BLECharacteristic* pCharTx = nullptr;
-const uint32_t MAX_FILE_SIZE = 5000000;
+BLECharacteristic *pCharTx = nullptr;
 const unsigned long TIMEOUT_MS = 65000;
 
-// POPRAWKA: Flaga do komunikacji między zadaniem BLE a główną pętlą
+// Flagi do komunikacji między przerwaniami BLE a główną pętlą
 volatile bool imageReadyToSend = false;
+volatile uint8_t receivedTxType = 0; // Przechowuje typ transmisji odczytany z BLE
 
-// Funkcje pomocnicze (bez zmian)
+// Funkcje pomocnicze
 static void sendAck(uint8_t code) {
-  if (pCharTx) { pCharTx->setValue(&code, 1); pCharTx->notify(); }
+  if (pCharTx) {
+    pCharTx->setValue(&code, 1);
+    pCharTx->notify();
+  }
 }
 
 static void resetRxState() {
-  Serial.println("[RESET] Resetowanie stanu odbiornika BLE");
+  Serial.println("[RESET] Resetowanie stanu odbiornika BLE.");
   rx.phase = WAITING_FOR_HEADER;
-  rx.fileSize = 0; rx.bytesRemaining = 0; rx.totalPkts = 0;
-  rx.receivedPkts = 0; rx.hdrGot = 0; rx.lastActivity = millis();
+  rx.fileSize = 0;
+  rx.bytesRemaining = 0;
+  rx.hdrGot = 0;
+  rx.lastActivity = millis();
   imageBuffer.clear();
+  receivedTxType = 0;
 }
 
-static bool validateHeader(const uint8_t* hdr) {
-  if (hdr[0] != 0xAB || hdr[1] != 0xCD) return false;
-  if (hdr[8] != 0xEF || hdr[9] != 0x12) return false;
-  uint32_t size = (uint32_t(hdr[2]) << 24) | (uint32_t(hdr[3]) << 16) | (uint32_t(hdr[4]) << 8) | uint32_t(hdr[5]);
-  return !(size == 0 || size > MAX_FILE_SIZE);
-}
+// Funkcja wysyłania przez LoRa
+void sendImageViaLoRa(uint8_t txType) {
+  if (imageBuffer.empty()) {
+    Serial.println("[LORA] Bufor obrazu pusty, anulowanie transmisji.");
+    return;
+  }
 
-// Funkcja wysyłania przez LoRa (z poprawkami na Stack Overflow i ToA)
-void sendImageViaLoRa() {
-    if (imageBuffer.empty()) {
-        Serial.println("[LORA] Bufor obrazu pusty, anulowanie transmisji.");
-        return;
-    }
-    
-    const int guardTimeMs = 100; 
-    uint32_t imageSize = imageBuffer.size();
-    uint16_t totalPackets = (imageSize + LORA_DATA_CHUNK_SIZE - 1) / LORA_DATA_CHUNK_SIZE;
-    Serial.printf("[LORA] Rozpoczynam transmisję obrazu do NODE_C. Rozmiar: %u bajtów, Pakiety: %u\n", imageSize, totalPackets);
-    Serial.printf("[LORA] Używany SF: %d, BW: %.1f kHz\n", LORA_SPREADING_FACTOR, LORA_BANDWIDTH);
-    
-    uint8_t startPacket[7];
-    startPacket[0] = PACKET_TYPE_START;
-    startPacket[1] = (imageSize >> 24) & 0xFF; startPacket[2] = (imageSize >> 16) & 0xFF;
-    startPacket[3] = (imageSize >> 8) & 0xFF; startPacket[4] = imageSize & 0xFF;
-    startPacket[5] = (totalPackets >> 8) & 0xFF; startPacket[6] = totalPackets & 0xFF;
-    
-    long toaStartUs = radio.getTimeOnAir(sizeof(startPacket));
-    Serial.printf("[LORA] Wysyłam pakiet START. ToA: %.2f ms\n", toaStartUs / 1000.0);
-    radio.transmit(startPacket, sizeof(startPacket));
+  const int guardTimeMs = 100;
+  uint32_t dataSize = imageBuffer.size();
+
+  const size_t LORA_DATA_CHUNK_SIZE = LORA_PACKET_SIZE - sizeof(LoRaHeader);
+  uint16_t totalDataPackets = (dataSize + LORA_DATA_CHUNK_SIZE - 1) / LORA_DATA_CHUNK_SIZE;
+
+  Serial.printf("[LORA] Rozpoczynam transmisję. Rozmiar: %u B, Pakiety danych: %u\n", dataSize, totalDataPackets);
+  uint8_t currentTransactionId = random(8);
+  Serial.printf("[LORA] ID tej transakcji: %u\n", currentTransactionId);
+
+  // --- 1. WYSYŁANIE RAMKI START ---
+  uint8_t startPacket[sizeof(LoRaHeader) + 7];
+  LoRaHeader *startHeader = (LoRaHeader *)startPacket;
+  startHeader->transaction_id = currentTransactionId;
+  startHeader->frame_type = FRAME_TYPE_START;
+  startHeader->sequence_num = 0;
+
+  // Ustawienie typu transmisji w ramce LoRa na podstawie tego, co odebraliśmy z BLE
+  if (txType == BLE_TX_TYPE_FULL_IMAGE) {
+      startPacket[sizeof(LoRaHeader)] = TX_TYPE_FULL_IMAGE;
+  } else if (txType == BLE_TX_TYPE_DIFF_RLE) {
+      startPacket[sizeof(LoRaHeader)] = TX_TYPE_DIFF_RLE;
+  }
+
+  *(uint16_t *)&startPacket[sizeof(LoRaHeader) + 1] = totalDataPackets;
+  *(uint32_t *)&startPacket[sizeof(LoRaHeader) + 3] = dataSize;
+
+
+  long toaStartUs = radio.getTimeOnAir(sizeof(startPacket));
+  Serial.printf("[LORA] Wysyłam pakiet START. ToA: %.2f ms\n", toaStartUs / 1000.0);
+  radio.transmit(startPacket, sizeof(startPacket));
+  delay((toaStartUs / 1000) + guardTimeMs);
+
+  // --- 2. WYSYŁANIE RAMEK Z DANYMI ---
+  static uint8_t dataPacket[LORA_PACKET_SIZE];
+  LoRaHeader *dataHeader = (LoRaHeader *)dataPacket;
+  for (uint16_t i = 0; i < totalDataPackets; ++i) {
+    dataHeader->transaction_id = currentTransactionId;
+    dataHeader->frame_type = FRAME_TYPE_DATA;
+    dataHeader->sequence_num = i;
+    size_t offset = i * LORA_DATA_CHUNK_SIZE;
+    size_t chunkSize = (offset + LORA_DATA_CHUNK_SIZE > dataSize) ? (dataSize - offset) : LORA_DATA_CHUNK_SIZE;
+    memcpy(&dataPacket[sizeof(LoRaHeader)], &imageBuffer[offset], chunkSize);
+    size_t packetLength = sizeof(LoRaHeader) + chunkSize;
+    long toaDataUs = radio.getTimeOnAir(packetLength);
+    Serial.printf("  > Wysyłam pakiet danych #%u/%u. Rozmiar: %d B, ToA: %.2f ms\n", i, totalDataPackets - 1, packetLength, toaDataUs / 1000.0);
+    radio.transmit(dataPacket, packetLength);
     delay((toaStartUs / 1000) + guardTimeMs);
+  }
 
-    // POPRAWKA: Deklaracja bufora jako 'static' zapobiega przepełnieniu stosu
-    static uint8_t dataPacket[LORA_PACKET_SIZE];
-
-    for (uint16_t i = 0; i < totalPackets; ++i) {
-        dataPacket[0] = PACKET_TYPE_DATA; 
-        dataPacket[1] = (i >> 8) & 0xFF; 
-        dataPacket[2] = i & 0xFF;
-        size_t offset = i * LORA_DATA_CHUNK_SIZE;
-        size_t chunkSize = (offset + LORA_DATA_CHUNK_SIZE > imageSize) ? (imageSize - offset) : LORA_DATA_CHUNK_SIZE;
-        size_t packetLength = chunkSize + 3;
-        memcpy(&dataPacket[3], &imageBuffer[offset], chunkSize);
-        
-        long toaDataUs = radio.getTimeOnAir(packetLength);
-        Serial.printf("[LORA] Wysyłam pakiet danych #%u/%u. Długość: %d B, ToA: %.2f ms\n", i + 1, totalPackets, packetLength, toaDataUs / 1000.0);
-        
-        radio.transmit(dataPacket, packetLength);
-        delay((toaDataUs / 1000) + guardTimeMs);
-    }
-
-    uint8_t endPacket[] = {PACKET_TYPE_END};
-    long toaEndUs = radio.getTimeOnAir(sizeof(endPacket));
-    radio.transmit(endPacket, sizeof(endPacket));
-    Serial.printf("[LORA] Wysłano pakiet END. ToA: %.2f ms. Transmisja zakończona.\n", toaEndUs / 1000.0);
+  // --- 3. WYSYŁANIE RAMKI KONIEC ---
+  uint8_t endPacket[sizeof(LoRaHeader)];
+  LoRaHeader *endHeader = (LoRaHeader *)endPacket;
+  endHeader->transaction_id = currentTransactionId;
+  endHeader->frame_type = FRAME_TYPE_END;
+  endHeader->sequence_num = 0;
+  long toaEndUs = radio.getTimeOnAir(sizeof(endPacket));
+  Serial.printf("[LORA] Wysyłam pakiet END. ToA: %.2f ms. Transmisja zakończona.\n", toaEndUs / 1000.0);
+  radio.transmit(endPacket, sizeof(endPacket));
 }
 
 // Callbacks dla serwera BLE
 class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) { Serial.println("[BLE] Połączono z klientem (NODE_A)"); resetRxState(); }
-  void onDisconnect(BLEServer* pServer) { Serial.println("[BLE] Rozłączono klienta."); BLEDevice::startAdvertising(); Serial.println("[BLE] Oczekiwanie na nowe połączenie..."); }
+  void onConnect(BLEServer *pServer) { Serial.println("[BLE] Połączono z klientem (NODE_A)"); resetRxState(); }
+  void onDisconnect(BLEServer *pServer) { Serial.println("[BLE] Rozłączono klienta."); BLEDevice::startAdvertising(); Serial.println("[BLE] Oczekiwanie na nowe połączenie..."); }
 };
 
-// POPRAWKA: Callback BLE już nie wysyła danych, tylko ustawia flagę
 class RxCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* chr) {
+  void onWrite(BLECharacteristic *chr) {
     std::string data = chr->getValue();
-    const uint8_t* p = (const uint8_t*)data.data();
+    const uint8_t *p = (const uint8_t *)data.data();
     size_t len = data.length();
     rx.lastActivity = millis();
 
-    if (rx.phase == TRANSMISSION_COMPLETE) { Serial.println("[STATE] Zakończono poprzedni transfer. Reset stanu."); resetRxState(); }
-    
+    if (rx.phase == TRANSMISSION_COMPLETE) { resetRxState(); }
+
     if (rx.phase == WAITING_FOR_HEADER) {
-      size_t need = sizeof(rx.hdrBuf) - rx.hdrGot;
+      size_t need = sizeof(BleHeader) - rx.hdrGot;
       size_t take = (len < need) ? len : need;
       memcpy(rx.hdrBuf + rx.hdrGot, p, take);
       rx.hdrGot += take;
-      if (rx.hdrGot == sizeof(rx.hdrBuf)) {
-        if (validateHeader(rx.hdrBuf)) {
-          rx.fileSize = (uint32_t(rx.hdrBuf[2]) << 24) | (uint32_t(rx.hdrBuf[3]) << 16) | (uint32_t(rx.hdrBuf[4]) << 8) | uint32_t(rx.hdrBuf[5]);
-          rx.totalPkts = (uint16_t(rx.hdrBuf[6]) << 8) | uint16_t(rx.hdrBuf[7]);
-          rx.bytesRemaining = rx.fileSize;
+
+      if (rx.hdrGot == sizeof(BleHeader)) {
+        BleHeader *header = (BleHeader *)rx.hdrBuf;
+        if (header->magic_start[0] == 0xAB && header->magic_start[1] == 0xCD && header->magic_end[0] == 0xEF && header->magic_end[1] == 0x12) {
+          rx.fileSize = header->data_size;
+          rx.bytesRemaining = header->data_size;
+          receivedTxType = header->tx_type;
           rx.phase = RECEIVING_DATA;
-          imageBuffer.clear(); imageBuffer.reserve(rx.fileSize);
-          Serial.println("[BUFFER] Bufor obrazu przygotowany.");
-          Serial.printf("[RECV] Prawidłowy nagłówek BLE: rozmiar=%lu, pakiety=%u\n", rx.fileSize, rx.totalPkts);
+          imageBuffer.clear();
+          imageBuffer.reserve(rx.fileSize);
+          Serial.printf("[BLE RECV] Prawidłowy nagłówek. Typ: 0x%X, Rozmiar: %lu\n", receivedTxType, rx.fileSize);
           sendAck(0x01);
-        } else { Serial.println("[ERROR] Nieprawidłowy nagłówek BLE - odrzucam i resetuję."); resetRxState(); }
+        } else {
+          Serial.println("[BLE ERROR] Nieprawidłowy nagłówek BLE.");
+          resetRxState();
+        }
       }
     } else if (rx.phase == RECEIVING_DATA) {
       if (len > rx.bytesRemaining) len = rx.bytesRemaining;
       imageBuffer.insert(imageBuffer.end(), p, p + len);
       rx.bytesRemaining -= len;
-      rx.receivedPkts++;
       if (rx.bytesRemaining == 0) {
-        Serial.println("\n[RECV] *** OBRAZ ODEBRANY KOMPLETNIE PRZEZ BLE! ***\n");
+        Serial.println("\n[RECV] *** DANE ODEBRANE KOMPLETNIE PRZEZ BLE! ***\n");
         rx.phase = TRANSMISSION_COMPLETE;
         sendAck(0xAA);
-        
-        // Zamiast wywoływać długą funkcję, tylko ustawiamy flagę
         imageReadyToSend = true;
       }
     }
@@ -181,56 +202,58 @@ class RxCallbacks : public BLECharacteristicCallbacks {
 };
 
 void setup() {
-  Serial.begin(115200); delay(1000);
+  Serial.begin(115200);
+  delay(1000);
   Serial.println("Starting Node B (Final Version)...");
-  
+
   BLEDevice::init("NODE_B");
-  BLEServer* server = BLEDevice::createServer();
+  BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
-  BLEService* svc = server->createService(SERVICE_UUID);
-  BLECharacteristic* pRx = svc->createCharacteristic(CHAR_UUID_RX, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  BLEService *svc = server->createService(SERVICE_UUID);
+  BLECharacteristic *pRx = svc->createCharacteristic(CHAR_UUID_RX, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pRx->setCallbacks(new RxCallbacks());
   pCharTx = svc->createCharacteristic(CHAR_UUID_TX, BLECharacteristic::PROPERTY_NOTIFY);
   pCharTx->addDescriptor(new BLE2902());
   svc->start();
   BLEDevice::startAdvertising();
   Serial.println("[BLE] Oczekiwanie na połączenie...");
-  
+
   pinMode(LORA_RST_PIN, OUTPUT);
   digitalWrite(LORA_RST_PIN, LOW); delay(10);
   digitalWrite(LORA_RST_PIN, HIGH); delay(10);
   SPI.begin(LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN);
   int state = radio.begin();
-  if (state != RADIOLIB_ERR_NONE) { Serial.print("[LORA] Błąd krytyczny, kod: "); Serial.println(state); while (1); }
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.print("[LORA] Błąd krytyczny, kod: ");
+    Serial.println(state);
+    while (1);
+  }
 
-  radio.setFrequency(LORA_FREQUENCY); 
+  radio.setFrequency(LORA_FREQUENCY);
   radio.setBandwidth(LORA_BANDWIDTH);
-  radio.setSpreadingFactor(LORA_SPREADING_FACTOR); 
+  radio.setSpreadingFactor(LORA_SPREADING_FACTOR);
   radio.setCodingRate(LORA_CODING_RATE);
   radio.setSyncWord(LORA_SYNC_WORD);
   radio.setOutputPower(LORA_TX_POWER);
   radio.setPreambleLength(LORA_PREAMLE_LENGTH);
-  radio.setCRC(true); 
+  radio.setCRC(true);
   radio.explicitHeader();
   Serial.println("[LORA] Inicjalizacja pomyślna.");
-  
+
   resetRxState();
 }
 
-// POPRAWKA: Główna pętla programu przejmuje zadanie wysyłania
 void loop() {
-  // Sprawdzenie timeoutu dla niedokończonej transmisji BLE
   if (rx.phase != WAITING_FOR_HEADER && millis() - rx.lastActivity > TIMEOUT_MS) {
     Serial.println("[TIMEOUT] Przekroczono limit czasu na aktywność BLE. Resetowanie stanu.");
     resetRxState();
   }
 
-  // Sprawdzenie flagi i uruchomienie transmisji LoRa z głównej pętli
   if (imageReadyToSend) {
-    imageReadyToSend = false; // Natychmiast resetuj flagę, aby uniknąć wielokrotnego wysyłania
-    sendImageViaLoRa();
-    resetRxState(); // Przygotuj się na kolejny obraz
+    imageReadyToSend = false;
+    sendImageViaLoRa(receivedTxType); // Przekaż zapisany typ transmisji
+    resetRxState();
   }
-  
-  delay(10); // Krótkie opóźnienie, aby nie obciążać procesora
+
+  delay(10);
 }

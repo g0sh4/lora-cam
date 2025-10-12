@@ -2,6 +2,7 @@
 #include <SPI.h>
 #include <RadioLib.h>
 #include <vector>
+#include "frame_structure.h"
 
 // piny - NIE ZMIENIAĆ BO INACZEJ NIE DZIAŁA
 #define LORA_SCK_PIN   7
@@ -63,8 +64,6 @@ void sendImageToComputer() {
     Serial.print("START_IMAGE_TRANSFER\n"); // Marker dla Pythona
     Serial.print(imageBuffer.size());      // Rozmiar dla Pythona
     Serial.print("\n");
-    
-    // Wysyłanie surowych bajtów obrazu
     Serial.write(imageBuffer.data(), imageBuffer.size());
     
     Serial.println("\n[PC] Transfer do komputera zakończony.");
@@ -73,7 +72,7 @@ void sendImageToComputer() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("Starting Node C (Image Receiver - Final Version)...");
+    Serial.println("Starting Node C (Image Receiver - In progress)...");
 
     pinMode(LORA_RST_PIN, OUTPUT);
     digitalWrite(LORA_RST_PIN, LOW); delay(10);
@@ -109,55 +108,76 @@ void loop() {
         packetReceived = false;
 
         int packetSize = radio.getPacketLength();
+        // Sprawdzamy, czy pakiet ma co najmniej rozmiar nagłówka
+        if (packetSize < sizeof(LoRaHeader)) {
+            Serial.println("[LORA] Błąd: Odebrano pakiet za krótki, by zawierać nagłówek.");
+            radio.startReceive(); // Ponownie włącz nasłuch
+            return;
+        }
+
         uint8_t packetBuffer[packetSize];
         radio.readData(packetBuffer, packetSize);
+        
+        // Rzutujemy początek bufora na strukturę nagłówka, aby łatwo odczytać dane
+        LoRaHeader* header = (LoRaHeader*)packetBuffer;
 
+        // Wyświetlamy szczegółowe logi dla każdego pakietu
         float rssi = radio.getRSSI();
         float snr = radio.getSNR();
-        float freqError = radio.getFrequencyError();    
-        Serial.printf("[LOG],SF=%d,RSSI=%.2f,SNR=%.2f,FREQ_ERR=%.2f,PKT_NUM=%u/%u,SIZE=%d\n", 
-                  LORA_SPREADING_FACTOR, rssi, snr, freqError, receivedPacketCount, expectedPacketCount, packetSize);
+        Serial.printf("[LOG] ID=%u, Typ=%u, Seq=%u, RSSI=%.2f, SNR=%.2f, Size=%d\n",
+                      header->transaction_id, header->frame_type, header->sequence_num, rssi, snr, packetSize);
 
-
-        if (packetSize > 0) {
-            uint8_t packetType = packetBuffer[0];
-            switch (currentState) {
-                case STATE_WAITING_FOR_START:
-                    if (packetType == PACKET_TYPE_START && packetSize == 7) {
-                        expectedImageSize = ((uint32_t)packetBuffer[1] << 24) | ((uint32_t)packetBuffer[2] << 16) | ((uint32_t)packetBuffer[3] << 8) | (uint32_t)packetBuffer[4];
-                        expectedPacketCount = ((uint16_t)packetBuffer[5] << 8) | (uint16_t)packetBuffer[6];
+        switch (currentState) {
+            case STATE_WAITING_FOR_START:
+                if (header->frame_type == FRAME_TYPE_START) {
+                    // Odczytujemy metadane z pola DANE ramki START
+                    uint8_t txType = packetBuffer[sizeof(LoRaHeader)];
+                    
+                    if (txType == TX_TYPE_FULL_IMAGE) {
+                        expectedPacketCount = *(uint16_t*)&packetBuffer[sizeof(LoRaHeader) + 1];
+                        expectedImageSize = *(uint32_t*)&packetBuffer[sizeof(LoRaHeader) + 3];
+                        
+                        imageBuffer.clear();
                         imageBuffer.reserve(expectedImageSize);
                         receivedPacketCount = 0;
                         currentState = STATE_RECEIVING_DATA;
-                        Serial.printf("\n[LORA] Odebrano pakiet START. Oczekiwany rozmiar: %u, pakiety: %u\n", expectedImageSize, expectedPacketCount);
+                        Serial.printf("\n[LORA] Odebrano START (Pełny Obraz). Oczekiwany rozmiar: %u, pakiety: %u\n", expectedImageSize, expectedPacketCount);
                     }
-                    break;
+                    // W przyszłości tutaj dodasz obsługę `else if (txType == TX_TYPE_DIFF_RLE)`
+                }
+                break;
 
-                case STATE_RECEIVING_DATA:
-                    if (packetType == PACKET_TYPE_DATA && packetSize > 3) {
-                        imageBuffer.insert(imageBuffer.end(), &packetBuffer[3], &packetBuffer[packetSize]);
-                        receivedPacketCount++;
-                        if (receivedPacketCount % 20 == 0 || receivedPacketCount == expectedPacketCount) {
-                            Serial.printf("  > Odebrano pakiet danych #%u/%u. Postęp: %d%%\n", receivedPacketCount, expectedPacketCount, (int)(100.0 * imageBuffer.size() / expectedImageSize));
-                        }
-                    } else if (packetType == PACKET_TYPE_END) {
-                        Serial.println("[LORA] Odebrano pakiet END.");
-                        
-                        if (imageBuffer.size() == expectedImageSize) {
-                            Serial.println("[LORA] SUKCES! Obraz odebrany w całości.");
-                            Serial.println("STATUS: COMPLETE"); 
-                        } else {
-                            Serial.printf("[LORA] BŁĄD! Odebrano obraz niekompletny. Oczekiwano: %u, otrzymano: %lu\n", expectedImageSize, imageBuffer.size());
-                            Serial.println("STATUS: INCOMPLETE"); 
-                        }
-                        sendImageToComputer();
+            case STATE_RECEIVING_DATA:
+                if (header->frame_type == FRAME_TYPE_DATA) {
+                    // Sprawdzamy, czy numer sekwencyjny się zgadza
+                    if (header->sequence_num == receivedPacketCount) {
+                         size_t dataSize = packetSize - sizeof(LoRaHeader);
+                         imageBuffer.insert(imageBuffer.end(), &packetBuffer[sizeof(LoRaHeader)], &packetBuffer[packetSize]);
+                         receivedPacketCount++;
 
-                        resetReceiverState();
+                         if (receivedPacketCount % 20 == 0 || receivedPacketCount == expectedPacketCount) {
+                            Serial.printf("  > Odebrano pakiet #%u/%u. Postęp: %d%%\n", receivedPacketCount, expectedPacketCount, (int)(100.0 * imageBuffer.size() / expectedImageSize));
+                        }
+                    } else {
+                        Serial.printf("[LORA] Błąd sekwencji! Oczekiwano pakietu #%u, a otrzymano #%u. Pomijam.\n", receivedPacketCount, header->sequence_num);
                     }
-                    break;
-            }
+
+                } else if (header->frame_type == FRAME_TYPE_END) {
+                    Serial.println("[LORA] Odebrano pakiet END.");
+                    
+                    if (imageBuffer.size() == expectedImageSize) {
+                        Serial.println("[LORA] SUKCES! Obraz odebrany w całości.");
+                        Serial.println("STATUS: COMPLETE"); 
+                    } else {
+                        Serial.printf("[LORA] BŁĄD! Obraz niekompletny. Oczekiwano: %u, otrzymano: %lu\n", expectedImageSize, imageBuffer.size());
+                        Serial.println("STATUS: INCOMPLETE"); 
+                    }
+                    sendImageToComputer();
+                    resetReceiverState();
+                }
+                break;
         }
         
-        radio.startReceive();
+        radio.startReceive(); // Zawsze ponownie włącz nasłuch po przetworzeniu pakietu
     }
 }
