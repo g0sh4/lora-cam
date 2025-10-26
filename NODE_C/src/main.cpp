@@ -147,7 +147,9 @@ void loop() {
                         imageBuffer.reserve(expectedImageSize);
                         receivedPacketCount = 0;
                         currentState = STATE_RECEIVING_DATA;
-                        Serial.printf("\n[LORA] Odebrano START (Pełny Obraz). Oczekiwany rozmiar: %u, pakiety: %u, Width: %u, Height: %u, Block: %u\n", expectedImageSize, expectedPacketCount, imageWidth, imageHeight, blockSize);
+                        // Serial.printf("\n[LORA] Odebrano START (Pełny Obraz). Oczekiwany rozmiar: %u, pakiety: %u, Width: %u, Height: %u, Block: %u\n", expectedImageSize, expectedPacketCount, imageWidth, imageHeight, blockSize);
+                        Serial.printf("\n[LORA LOG] Odebrano START (Typ: %s). Rozmiar: %u, pakiety: %u, Width: %u, Height: %u, Block: %u\n",
+  (txType == TX_TYPE_FULL_IMAGE) ? "FULL" : "DIFF", expectedImageSize, expectedPacketCount, imageWidth, imageHeight, blockSize);
                     }
                 }
                 break;

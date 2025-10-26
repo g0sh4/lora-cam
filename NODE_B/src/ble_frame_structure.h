@@ -6,6 +6,7 @@
 
 const uint8_t BLE_TX_TYPE_FULL_IMAGE = 0xF1; // F od Full (Pełny)
 const uint8_t BLE_TX_TYPE_DIFF_RLE   = 0xD1; // D od Diff (Różnicowy)
+const uint8_t  BLE_TX_TYPE_SPARSE_JPEG = 0xC1 ;
 
 struct BleHeader {
     uint8_t  magic_start[2]; // Wartość: {0xAB, 0xCD}

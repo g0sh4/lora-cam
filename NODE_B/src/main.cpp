@@ -99,7 +99,7 @@ uint32_t dataSize = imageBuffer.size();
 
   const size_t LORA_DATA_CHUNK_SIZE = LORA_PACKET_SIZE - sizeof(LoRaHeader);
   uint16_t totalDataPackets = (dataSize + LORA_DATA_CHUNK_SIZE - 1) / LORA_DATA_CHUNK_SIZE;
-
+  Serial.printf("[LORA] Typ transmisji: %s\n", (txType == BLE_TX_TYPE_FULL_IMAGE) ? "FULL" : "DIFF");
   Serial.printf("[LORA] Rozpoczynam transmisję. Rozmiar: %u B, Pakiety danych: %u\n", dataSize, totalDataPackets);
   uint8_t currentTransactionId = random(8);
   Serial.printf("[LORA] ID tej transakcji: %u\n", currentTransactionId);

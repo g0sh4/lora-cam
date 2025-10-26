@@ -1,123 +1,97 @@
 import serial
 import time
 import os
+import io
+# Usunięto import Image i numpy, bo nie przetwarzamy obrazu
+# from PIL import Image
+# import numpy as np
 
 # --- Konfiguracja ---
-# Proszę zmieniać te wartości przed każdym nowym testem
-SF = "SF7"
-d = "1"
-
-# Windows: 'COM3', 'COM4' itp. | Linux: '/dev/ttyACM0' | macOS: '/dev/tty.usbmodemXXXX' 
-SERIAL_PORT = 'COM11' 
+SERIAL_PORT = 'COM11' # Zmień na swój port
 BAUD_RATE = 115200
-
-# Ten marker nie uległ zmianie w kodzie C++. Skrypt wciąż będzie go nasłuchiwał.
 START_MARKER = 'START_IMAGE_TRANSFER'
+RESULTS_DIR = "wyniki_testow"
+os.makedirs(RESULTS_DIR, exist_ok=True)
+# --------------------
 
-def log(message, log_file_handle):
-    """Wypisuje wiadomość na konsoli i zapisuje ją do pliku logu."""
+def log(message):
+    """Proste logowanie na konsolę."""
     timestamp = time.strftime("%H:%M:%S")
-    log_message = f"[{timestamp}] {message}"
-    
-    print(log_message)
-    if log_file_handle:
-        log_file_handle.write(log_message + '\n')
-        log_file_handle.flush()
+    print(f"[{timestamp}] {message}")
 
 def main():
-    # --- Logowanie do pliku (bez zmian) ---
-    run_timestamp = time.strftime("%Y%m%d-%H%M%S")
-    log_filename = f"{SF}_{d}_{run_timestamp}.log"
-    
-    results_dir = "wyniki_testow"
-    os.makedirs(results_dir, exist_ok=True)
-    
-    log_filepath = os.path.join(results_dir, log_filename)
+    log(f"Uproszczony odbiornik obrazów. Czekam na {SERIAL_PORT}...")
 
-    with open(log_filepath, 'w', encoding='utf-8') as log_file:
-        log(f"Skrypt odbiornika obrazów uruchomiony. Logowanie do pliku: {log_filepath}", log_file)
-        log(f"Parametry testu: SF={SF}, Dystans={d}", log_file)
-        log(f"Oczekiwanie na połączenie na porcie {SERIAL_PORT}...", log_file)
+    try:
+        with serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2) as ser:
+            log("Połączono! Oczekiwanie na dane...")
+            image_counter = 0 # Licznik zapisanych obrazów
 
-        try:
-            with serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2) as ser:
-                log("Połączono! Oczekiwanie na dane z Węzła C...", log_file)
-                
-                while True:
-                    try:
-                        # Odczytujemy linie z logami z ESP32, aż znajdziemy marker startu
-                        line = ser.readline().decode('utf-8', errors='ignore').strip()
+            while True:
+                try:
+                    line = ser.readline().decode('utf-8', errors='ignore').strip()
+                    if not line: continue
 
-                        if not line:
+                    # --- Logika odbioru ---
+                    if line == START_MARKER:
+                        log(f"\n[+] Wykryto marker startu!")
+                        image_counter += 1
+
+                        # Odczytaj linię z metadanymi
+                        meta_line = ser.readline().decode('utf-8').strip()
+                        log(f"[Node C Meta]: {meta_line}")
+                        parts = meta_line.split(',')
+
+                        if len(parts) != 4 or not all(p.strip().isdigit() for p in parts):
+                            log(f"[!] Błąd: Oczekiwano 'size,width,height,block_size', otrzymano: '{meta_line}'")
                             continue
 
-                        # Logowanie statusu (COMPLETE/INCOMPLETE) wysyłanego przez Węzeł C
-                        image_status = "UNKNOWN"
-                        if line.startswith("STATUS:"):
-                            image_status = line.split(":")[1].strip()
-                            log(f"[Arduino C]: {line}", log_file)
-                            # Po statusie spodziewamy się markera, więc czytamy kolejną linię
-                            line = ser.readline().decode('utf-8', errors='ignore').strip()
+                        expected_image_size = int(parts[0].strip())
+                        image_width = int(parts[1].strip())
+                        image_height = int(parts[2].strip())
+                        block_size = int(parts[3].strip())
+                        log(f"[*] Oczekiwane Metadata: Rozmiar={expected_image_size}, W={image_width}, H={image_height}, Blok={block_size}.")
 
-                        # --- LOGIKA ODBIORU OBRAZU (rozszerzona o width, height, block_size) ---
-                        # 1. Szukaj markera startu
-                        if line == START_MARKER:
-                            log(f"[Arduino C]: {line}", log_file) 
-                            log(f"\n[+] Wykryto marker startu (Status z Arduino: {image_status})!", log_file)
+                        # Odczytaj dane obrazu
+                        log(f"[*] Odbieranie {expected_image_size} bajtów obrazu...")
+                        image_data = ser.read(expected_image_size)
 
-                            # 2. Odczytaj kolejną linię, która zawiera rozmiar, width, height, block_size (przecinki)
-                            size_line = ser.readline().decode('utf-8').strip()
-                            log(f"[Arduino C]: {size_line}", log_file)
-                            
-                            parts = size_line.split(',')
-                            if len(parts) != 4 or not all(p.strip().isdigit() for p in parts):
-                                log(f"[!] Błąd: Oczekiwano 'size,width,height,block_size', a otrzymano: '{size_line}'", log_file)
-                                continue
-                            
-                            expected_image_size = int(parts[0].strip())
-                            image_width = int(parts[1].strip())
-                            image_height = int(parts[2].strip())
-                            block_size = int(parts[3].strip())
-                            log(f"[*] Oczekiwany rozmiar obrazu: {expected_image_size} bajtów, Width: {image_width}, Height: {image_height}, Block: {block_size}.", log_file)
+                        if len(image_data) != expected_image_size:
+                            log(f"[!] Błąd: Odebrano {len(image_data)}/{expected_image_size} bajtów. Transfer niekompletny.")
+                            continue
+                        log("[+] Dane obrazu odebrane poprawnie.")
 
-                            # 3. Odczytaj dokładnie tyle surowych bajtów, ile podano w rozmiarze
-                            log(f"[*] Odbieranie danych obrazu...", log_file)
-                            image_data = ser.read(expected_image_size)
-                            
-                            # Sprawdzenie, czy odebrano kompletną paczkę danych
-                            is_complete = len(image_data) == expected_image_size
-                            
-                            image_timestamp = time.strftime("%Y%m%d-%H%M%S")
-                            # Dodajemy dopisek _INCOMPLETE, jeśli status z Arduino tak wskazuje
-                            status_suffix = "_INCOMPLETE" if not is_complete or image_status == "INCOMPLETE" else ""
-                            
-                            base_filename = f'recived_img_{SF}_{d}_{image_timestamp}{status_suffix}.jpg'
-                            image_filepath = os.path.join(results_dir, base_filename)
-                            
-                            with open(image_filepath, 'wb') as f:
+                        image_timestamp = time.strftime("%Y%m%d-%H%M%S")
+                        # Prosta nazwa pliku
+                        filename = f"received_image_{image_counter:03d}_{image_timestamp}.jpg"
+                        filepath = os.path.join(RESULTS_DIR, filename)
+
+                        # --- Zapisywanie pliku ---
+                        try:
+                            with open(filepath, 'wb') as f:
                                 f.write(image_data)
-                            
-                            if is_complete:
-                                log(f"[+] SUKCES! Obraz został zapisany do pliku: {image_filepath}", log_file)
-                            else:
-                                log(f"[!] OSTRZEŻENIE: Zapisano niekompletny obraz do pliku: {image_filepath}", log_file)
-                                log(f"    Odebrano {len(image_data)} z oczekiwanych {expected_image_size} bajtów.", log_file)
-                            
-                            log("\nOczekiwanie na kolejny obraz...", log_file)
+                            log(f"[*] Obraz zapisany jako: {filepath}")
+                        except Exception as e:
+                            log(f"[!] Błąd podczas zapisywania pliku: {e}")
 
-                        # Jeśli linia nie jest markerem, po prostu ją loguj
-                        elif line:
-                            log(f"[Arduino C]: {line}", log_file)
+                        log("\nOczekiwanie na kolejny obraz...")
 
-                    except Exception as e:
-                        log(f"[BŁĄD KRYTYCZNY W PĘTLI] Wystąpił wyjątek: {e}", log_file)
-                        pass
+                    elif line: # Loguj inne linie z Node C
+                        log(f"[Node C]: {line}")
 
-        except serial.SerialException as e:
-            log(f"BŁĄD KRYTYCZNY: Nie można otworzyć portu {SERIAL_PORT}.", log_file)
-            log(f"Sprawdź połączenie i nazwę portu.", log_file)
-        except KeyboardInterrupt:
-            log("\nProgram zatrzymany przez użytkownika.", log_file)
+                except UnicodeDecodeError:
+                     pass # Ignoruj błędy dekodowania
+                except serial.SerialTimeoutException:
+                     log("[Timeout] Brak danych w oknie czasowym.")
+                     pass # Kontynuuj czekanie
+                except Exception as e:
+                    log(f"[!] Błąd w pętli głównej: {e}")
+                    time.sleep(1)
+
+    except serial.SerialException as e:
+        log(f"BŁĄD KRYTYCZNY: Nie można otworzyć portu {SERIAL_PORT}. {e}")
+    except KeyboardInterrupt:
+        log("\nProgram zatrzymany przez użytkownika.")
 
 if __name__ == '__main__':
     main()
