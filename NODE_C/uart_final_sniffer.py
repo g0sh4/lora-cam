@@ -59,22 +59,26 @@ def main():
                             # Po statusie spodziewamy się markera, więc czytamy kolejną linię
                             line = ser.readline().decode('utf-8', errors='ignore').strip()
 
-                        # --- LOGIKA ODBIORU OBRAZU (BEZ ZMIAN) ---
+                        # --- LOGIKA ODBIORU OBRAZU (rozszerzona o width, height, block_size) ---
                         # 1. Szukaj markera startu
                         if line == START_MARKER:
                             log(f"[Arduino C]: {line}", log_file) 
                             log(f"\n[+] Wykryto marker startu (Status z Arduino: {image_status})!", log_file)
 
-                            # 2. Odczytaj kolejną linię, która zawiera rozmiar obrazu
+                            # 2. Odczytaj kolejną linię, która zawiera rozmiar, width, height, block_size (przecinki)
                             size_line = ser.readline().decode('utf-8').strip()
                             log(f"[Arduino C]: {size_line}", log_file)
                             
-                            if not size_line.isdigit():
-                                log(f"[!] Błąd: Oczekiwano rozmiaru obrazu, a otrzymano: '{size_line}'", log_file)
+                            parts = size_line.split(',')
+                            if len(parts) != 4 or not all(p.strip().isdigit() for p in parts):
+                                log(f"[!] Błąd: Oczekiwano 'size,width,height,block_size', a otrzymano: '{size_line}'", log_file)
                                 continue
                             
-                            expected_image_size = int(size_line)
-                            log(f"[*] Oczekiwany rozmiar obrazu: {expected_image_size} bajtów.", log_file)
+                            expected_image_size = int(parts[0].strip())
+                            image_width = int(parts[1].strip())
+                            image_height = int(parts[2].strip())
+                            block_size = int(parts[3].strip())
+                            log(f"[*] Oczekiwany rozmiar obrazu: {expected_image_size} bajtów, Width: {image_width}, Height: {image_height}, Block: {block_size}.", log_file)
 
                             # 3. Odczytaj dokładnie tyle surowych bajtów, ile podano w rozmiarze
                             log(f"[*] Odbieranie danych obrazu...", log_file)

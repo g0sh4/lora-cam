@@ -41,7 +41,6 @@ SX1262 radio(&mod);
 #define CHAR_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHAR_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-// Stany i zmienne globalne
 enum RxPhase {
   WAITING_FOR_HEADER,
   RECEIVING_DATA,
@@ -53,6 +52,9 @@ struct RxState {
   uint8_t hdrBuf[sizeof(BleHeader)];
   size_t hdrGot = 0;
   unsigned long lastActivity = 0;
+  uint16_t width = 0;      // Nowe
+  uint16_t height = 0;     // Nowe
+  uint8_t block_size = 0;  // Nowe
 } rx;
 
 std::vector<uint8_t> imageBuffer;
@@ -78,6 +80,9 @@ static void resetRxState() {
   rx.bytesRemaining = 0;
   rx.hdrGot = 0;
   rx.lastActivity = millis();
+  rx.width = 0;
+  rx.height = 0;
+  rx.block_size = 0;
   imageBuffer.clear();
   receivedTxType = 0;
 }
@@ -90,7 +95,7 @@ void sendImageViaLoRa(uint8_t txType) {
   }
 
   const int guardTimeMs = 100;
-  uint32_t dataSize = imageBuffer.size();
+uint32_t dataSize = imageBuffer.size();
 
   const size_t LORA_DATA_CHUNK_SIZE = LORA_PACKET_SIZE - sizeof(LoRaHeader);
   uint16_t totalDataPackets = (dataSize + LORA_DATA_CHUNK_SIZE - 1) / LORA_DATA_CHUNK_SIZE;
@@ -100,24 +105,21 @@ void sendImageViaLoRa(uint8_t txType) {
   Serial.printf("[LORA] ID tej transakcji: %u\n", currentTransactionId);
 
   // --- 1. WYSYŁANIE RAMKI START ---
-  uint8_t startPacket[sizeof(LoRaHeader) + 7];
+  uint8_t startPacket[sizeof(LoRaHeader) + 1 + 2 + 2 + 1 + 2 + 4];  // tx_type(1) + width(2) + height(2) + block_size(1) + totalPackets(2) + dataSize(4)
   LoRaHeader *startHeader = (LoRaHeader *)startPacket;
   startHeader->transaction_id = currentTransactionId;
   startHeader->frame_type = FRAME_TYPE_START;
   startHeader->sequence_num = 0;
 
-  // Ustawienie typu transmisji w ramce LoRa na podstawie tego, co odebraliśmy z BLE
-  if (txType == BLE_TX_TYPE_FULL_IMAGE) {
-      startPacket[sizeof(LoRaHeader)] = TX_TYPE_FULL_IMAGE;
-  } else if (txType == BLE_TX_TYPE_DIFF_RLE) {
-      startPacket[sizeof(LoRaHeader)] = TX_TYPE_DIFF_RLE;
-  }
+  size_t offset = sizeof(LoRaHeader);
+  startPacket[offset++] = (txType == BLE_TX_TYPE_FULL_IMAGE) ? TX_TYPE_FULL_IMAGE : TX_TYPE_DIFF_RLE;
+  *(uint16_t *)(startPacket + offset) = rx.width; offset += 2;   // Nowe: width
+  *(uint16_t *)(startPacket + offset) = rx.height; offset += 2;  // Nowe: height
+  startPacket[offset++] = rx.block_size;                         // Nowe: block_size
+  *(uint16_t *)(startPacket + offset) = totalDataPackets; offset += 2;
+  *(uint32_t *)(startPacket + offset) = dataSize;
 
-  *(uint16_t *)&startPacket[sizeof(LoRaHeader) + 1] = totalDataPackets;
-  *(uint32_t *)&startPacket[sizeof(LoRaHeader) + 3] = dataSize;
-
-
-  long toaStartUs = radio.getTimeOnAir(sizeof(startPacket));
+  long toaStartUs = radio.getTimeOnAir(offset);
   Serial.printf("[LORA] Wysyłam pakiet START. ToA: %.2f ms\n", toaStartUs / 1000.0);
   radio.transmit(startPacket, sizeof(startPacket));
   delay((toaStartUs / 1000) + guardTimeMs);
@@ -177,6 +179,9 @@ class RxCallbacks : public BLECharacteristicCallbacks {
           rx.fileSize = header->data_size;
           rx.bytesRemaining = header->data_size;
           receivedTxType = header->tx_type;
+          rx.width = header->width;           // Nowe
+          rx.height = header->height;         // Nowe
+          rx.block_size = header->block_size; // Nowe
           rx.phase = RECEIVING_DATA;
           imageBuffer.clear();
           imageBuffer.reserve(rx.fileSize);
@@ -204,7 +209,7 @@ class RxCallbacks : public BLECharacteristicCallbacks {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("Starting Node B (Final Version)...");
+  Serial.println("Starting Node B (v3)...");
 
   BLEDevice::init("NODE_B");
   BLEServer *server = BLEDevice::createServer();

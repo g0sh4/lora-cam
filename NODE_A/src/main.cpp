@@ -9,17 +9,14 @@
 #include <BLEClient.h>
 #include "ble_frame_structure.h"
 
-// --- Konfiguracja pinów ---
 constexpr uint8_t SD_CS   = 21;
 constexpr uint8_t SD_SCK  = 7;
 constexpr uint8_t SD_MISO = 8;
 constexpr uint8_t SD_MOSI = 9;
 SPIClass sdSPI(FSPI);
 
-// NOWOŚĆ: Definicja pinu przycisku
-const int buttonPin = 0; // Przycisk użytkownika na XIAO ESP32-S3 to GPIO0
+const int buttonPin = 0; 
 
-// --- Konfiguracja BLE ---
 #define SERVICE_UUID      "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHAR_UUID_RX      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHAR_UUID_TX      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -27,7 +24,6 @@ const int buttonPin = 0; // Przycisk użytkownika na XIAO ESP32-S3 to GPIO0
 const char* NODE_B_NAME = "NODE_B";
 const size_t PAYLOAD_SIZE = 180;
 
-// --- Zmienne globalne ---
 BLEClient* pClient = nullptr;
 BLERemoteCharacteristic* pCharRx = nullptr;
 BLERemoteCharacteristic* pCharTx = nullptr;
@@ -41,7 +37,6 @@ int lastButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 unsigned long debounceDelay = 50; 
 
-// --- Funkcje ---
 void notifyCB(BLERemoteCharacteristic* rc, uint8_t* data, size_t len, bool isNotify) {
   if (len > 0) { ackValue = data[0]; }
 }
@@ -54,7 +49,7 @@ void initCamera() {
     .pin_d3 = Y5_GPIO_NUM, .pin_d2 = Y4_GPIO_NUM, .pin_d1 = Y3_GPIO_NUM,
     .pin_d0 = Y2_GPIO_NUM, .pin_vsync = VSYNC_GPIO_NUM, .pin_href  = HREF_GPIO_NUM,
     .pin_pclk  = PCLK_GPIO_NUM, .xclk_freq_hz = 20000000, .pixel_format = PIXFORMAT_JPEG,
-    .frame_size  = FRAMESIZE_HQVGA, .jpeg_quality = 20, .fb_count = 1
+    .frame_size  = FRAMESIZE_VGA, .jpeg_quality = 20, .fb_count = 1
   };
   if (esp_camera_init(&cfg) != ESP_OK) { Serial.println("[ERROR] Camera init failed"); while (true) delay(1000); }
   else { Serial.println("[OK] Camera initialized successfully"); }
@@ -98,8 +93,6 @@ bool connectToNodeB() {
   }
   return false;
 }
-// Plik: NODE_A/src/main.cpp
-
 void captureAndProcessImage() {
     Serial.println("\n[ACTION] Uruchamiam proces foto-transmisji...");
     
@@ -117,23 +110,20 @@ void captureAndProcessImage() {
         return;
     }
     
-    // ================== POCZĄTEK POPRAWKI ==================
-    // Tworzymy nagłówek BLE DOKŁADNIE tak, jak w Twoim pliku .h
     BleHeader header;
-    header.magic_start[0] = 0xAB;
+header.magic_start[0] = 0xAB;
     header.magic_start[1] = 0xCD;
     header.tx_type = BLE_TX_TYPE_FULL_IMAGE;
     header.data_size = fileSize;
+    header.width = 640;      
+    header.height = 480;
+    header.block_size = 16;  
     header.magic_end[0] = 0xEF;
     header.magic_end[1] = 0x12;
-    // (Brak pola total_packets)
-    // =================== KONIEC POPRAWKI ===================
 
-    // Wysyłamy nagłówek
     pCharRx->writeValue((uint8_t*)&header, sizeof(header), false);
     Serial.println("[BLE] Wysłano nagłówek (bez oczekiwania na ACK).");
     
-    // Dajemy Węzłowi B chwilę na przetworzenie nagłówka
     delay(50); 
     
     Serial.println("[BLE] Rozpoczynam wysyłanie danych obrazu...");
@@ -172,10 +162,19 @@ void sendImage(const char* path) {
   Serial.printf("[sendImage] Plik: %s, Rozmiar: %lu B, Pakiety: %u\n", path, fileSize, totalPkts);
   Serial.println("====================================");
   
-  // ... reszta funkcji bez zmian ...
-  uint8_t hdr[10] = { 0xAB, 0xCD, (uint8_t)(fileSize >> 24), (uint8_t)(fileSize >> 16), (uint8_t)(fileSize >> 8), (uint8_t)fileSize, (uint8_t)(totalPkts >> 8), (uint8_t)totalPkts, 0xEF, 0x12 };
+  // uint8_t hdr[10] = { 0xAB, 0xCD, (uint8_t)(fileSize >> 24), (uint8_t)(fileSize >> 16), (uint8_t)(fileSize >> 8), (uint8_t)fileSize, (uint8_t)(totalPkts >> 8), (uint8_t)totalPkts, 0xEF, 0x12 };
+  BleHeader header;
+  header.magic_start[0] = 0xAB;
+  header.magic_start[1] = 0xCD;
+  header.tx_type = BLE_TX_TYPE_FULL_IMAGE;
+  header.data_size = fileSize;
+  header.width = 640;      // Nowe: Rozdzielczość VGA
+  header.height = 480;
+  header.block_size = 16;  // Nowe: Wielkość bloku (konfigurowalna)
+  header.magic_end[0] = 0xEF;
+  header.magic_end[1] = 0x12; 
   ackValue = 0x00;
-  pCharRx->writeValue(hdr, sizeof(hdr), false);
+  pCharRx->writeValue((uint8_t*)&header, sizeof(header), false);
   Serial.println("[sendImage] Wysłano nagłówek. Czekam na ACK...");
   unsigned long startWait = millis();
   while (ackValue != 0x01 && millis() - startWait < 2000) { delay(10); }
@@ -230,9 +229,8 @@ void sendImage(const char* path) {
 
 void setup() {
   Serial.begin(115200); delay(1000);
-  Serial.println("Starting Node A (Button Trigger Version v2)...");
+  Serial.println("Starting Node A (Button Trigger Version v3)...");
 
-  // NOWOŚĆ: Konfiguracja pinu przycisku
   pinMode(buttonPin, INPUT_PULLUP);
   Serial.println("[OK] Przycisk na pinie GPIO0 skonfigurowany.");
 
@@ -242,7 +240,7 @@ void setup() {
 }
 
 void loop() {
-  // --- Zarządzanie połączeniem BLE (bez zmian) ---
+
   if (!pClient || !pClient->isConnected()) {
     unsigned long now = millis();
     if (now - lastConnectAttempt > CONNECT_RETRY_INTERVAL) {
@@ -257,26 +255,19 @@ void loop() {
       else { Serial.println("[BLE] Nie udało się połączyć."); }
     }
     delay(100); 
-    return; // Jeśli nie ma połączenia, nie sprawdzaj przycisku
+    return; 
   }
   
-  // ZMIANA: Całkowicie nowa logika pętli oparta na przycisku
-  
-  // 1. Odczytaj stan przycisku
+
   int reading = digitalRead(buttonPin);
 
-  // 2. Sprawdź, czy stan się zmienił (debouncing)
   if (reading != lastButtonState) {
     lastDebounceTime = millis();
   }
 
-  // 3. Po upływie czasu debouncingu, sprawdź stabilny stan
   if ((millis() - lastDebounceTime) > debounceDelay) {
-    // Jeśli stan się ustabilizował i jest inny niż poprzednio
     if (reading != buttonState) {
       buttonState = reading;
-      
-      // Jeśli przycisk został wciśnięty (stan zmienił się na LOW)
       if (buttonState == LOW) {
         // sendImage("/image.jpg");
         captureAndProcessImage();
@@ -284,6 +275,5 @@ void loop() {
     }
   }
 
-  // 4. Zapisz obecny stan do następnej iteracji
   lastButtonState = reading;
 }
