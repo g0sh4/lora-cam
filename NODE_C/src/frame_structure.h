@@ -6,7 +6,9 @@
 const uint8_t FRAME_TYPE_START = 1; // 001
 const uint8_t FRAME_TYPE_DATA  = 5; // 101
 const uint8_t FRAME_TYPE_END   = 7; // 111
-
+const uint8_t FRAME_TYPE_NACK   = 2; // 010 (Prośba o retransmisję)
+const uint8_t FRAME_TYPE_ACK    = 3; // 011 (Potwierdzenie)
+const uint8_t FRAME_TYPE_RE_END = 4; // 100 (Koniec retransmisji)
 // START FRAME
 const uint8_t TX_TYPE_FULL_IMAGE = 0x01;
 const uint8_t TX_TYPE_DIFF_RLE   = 0x02;

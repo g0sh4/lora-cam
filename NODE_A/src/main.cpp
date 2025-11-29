@@ -4,8 +4,7 @@
 #include <esp_camera.h>
 #include <SD.h>
 #include <SPI.h>
-  // <-- Używamy JPEGDEC
-// #include <JPEGENC.h>
+// #include <JPEGENC.h> // <-- Używamy JPEGDEC
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEClient.h>
@@ -43,15 +42,30 @@ int buttonState = HIGH;
 int lastButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 unsigned long debounceDelay = 50;
-
+enum DiffMethod {
+  METHOD_MAD,             // Mean Absolute Difference (Twoja obecna metoda)
+  METHOD_COSINE_DISTANCE, // Algorytm z Sekcji 2.6.2 (Cosine Similarity)
+  METHOD_MSE,            // Mean Squared Error (MSE)
+  METHOD_DSSIM
+};
 bool first_press = true;  // Stan: Pierwsze kliknięcie - full, kolejne - diff
 
-uint16_t img_width = 640;  // VGA
-uint16_t img_height = 480;
-uint8_t block_size = 16;
-float mad_threshold = 10.0;  // Próg MAD dla zmiany bloku
-uint8_t jpeg_encode_quality = 60; // Jakość dla Sparse JPEG (0-100)
-uint8_t sparse_background_color = 0x00;
+// === ZMIENIONO ===
+// Dostosowano do formatu QVGA (320x240) zgodnie z nazwami plików.
+uint16_t img_width = 320;  // QVGA
+uint16_t img_height = 240;
+// =================
+DiffMethod currentDiffMethod = METHOD_DSSIM;
+float mad_threshold = 5.0;  // Próg MAD dla zmiany bloku
+float cosine_dist_threshold = 0.005; // Próg odległości cosinusowej dla zmiany bloku
+float mse_threshold = 180.0; // Próg MSE dla zmiany bloku
+float dssim_threshold = 0.05; // Próg DSSIM dla zmiany bloku
+
+uint8_t block_size = 16; // Rozmiar bloku 16x16 pikseli
+
+
+uint8_t jpeg_encode_quality = 80; // Jakość dla Sparse JPEG (0-100)
+uint8_t sparse_background_color = 0x00; // ZMIENIONO: Użyj 0x00 (czerń) jako tła, aby pasowało do skryptu Pythona
 
 // Globalny bufor grayscale dla callbacka
 static uint8_t* global_gray_buf = nullptr;
@@ -59,57 +73,50 @@ static uint16_t global_img_width = 0;
 static uint8_t* prev_gray = nullptr; // Bufor na poprzedni obraz
 static std::vector<uint8_t> encodedJpegData;
 
+// === DODANO: Zmienne do zarządzania sekwencją plików ===
+static int current_frame_index = 1; // Zaczyna od pliku _0001.jpg
+const int max_frame_index = 6;      // Ostatni plik w sekwencji to _0006.jpg
+const char* base_filename = "/frame_qvga_14719992_"; // Bazowa część nazwy pliku (zaczynamy od / dla katalogu głównego SD)
+const char* file_extension = ".jpg";
+static char current_filename_buffer[50]; // Globalny bufor na pełną nazwę pliku
+// =======================================================
+
+
 // ===============================================================
 // === FUNKCJE POMOCNICZE (CALLBACKI) DLA BIBLIOTEKI JPEGDEC ===
 // ===============================================================
 
-/**
- * @brief Callback do czytania danych z pliku (File) dla JPEGDEC
- */
 static int32_t jpegReadCallback(JPEGFILE *pHandle, uint8_t *pBuffer, int32_t iLength) {
   File *f = static_cast<File *>(pHandle->fHandle);
   return f->read(pBuffer, iLength);
 }
 
-/**
- * @brief Callback do przewijania pliku (File) dla JPEGDEC
- */
 static int32_t jpegSeekCallback(JPEGFILE *pHandle, int32_t iPosition) {
   File *f = static_cast<File *>(pHandle->fHandle);
   if (f->seek(iPosition)) {
     return 0; // Sukces
   }
-  // === DODANO LOGOWANIE BŁĘDU ===
   Serial.printf("[JPEGDEC SEEK ERROR] Nie udało się przewinąć do pozycji: %d\n", iPosition);
   return -1; // Błąd
 }
 
-/**
- * @brief Callback do zamykania pliku (File) dla JPEGDEC
- */
 static void jpegCloseCallback(void *pHandle) {
   File *f = static_cast<File *>(pHandle);
   f->close();
 }
 
-
-/**
- * @brief Callback do rysowania (dekodowania) bloku pikseli dla JPEGDEC
- */
 static int jpegDrawCallback(JPEGDRAW *pDraw) {
-  uint16_t *pPixels = (uint16_t *)pDraw->pPixels;
+  // === ZMIENIONO: Cała funkcja ===
+  // Poprzednio: konwertowaliśmy z RGB565.
+  // Teraz: Otrzymujemy bezpośrednio 8-bitową skalę szarości.
+  uint8_t *pPixels = (uint8_t *)pDraw->pPixels;
   int x = pDraw->x, y = pDraw->y, w = pDraw->iWidth, h = pDraw->iHeight;
 
+  // Szybsze kopiowanie, linia po linii
   for (int py = 0; py < h; py++) {
-    for (int px = 0; px < w; px++) {
-      uint16_t color = pPixels[py * w + px];
-      uint8_t r = (color >> 11) & 0x1F; r = (r << 3) | (r >> 2);
-      uint8_t g = (color >> 5) & 0x3F; g = (g << 2) | (g >> 4);
-      uint8_t b = color & 0x1F; b = (b << 3) | (b >> 2);
-      uint8_t gray = (uint8_t)(0.299f * r + 0.587f * g + 0.114f * b + 0.5f);
-      
-      global_gray_buf[(y + py) * global_img_width + (x + px)] = gray;
-    }
+    int_fast32_t src_offset = py * w;
+    int_fast32_t dst_offset = (y + py) * global_img_width + x;
+    memcpy(global_gray_buf + dst_offset, pPixels + src_offset, w);
   }
   return 1; // Kontynuuj dekodowanie
 }
@@ -127,6 +134,7 @@ int32_t myJpegEncWrite(JPEGE_FILE *p, uint8_t *buffer, int32_t length) {
 }
 int32_t myJpegEncRead(JPEGE_FILE *p, uint8_t *buffer, int32_t length) { return 0; } // Nieużywane
 int32_t myJpegEncSeek(JPEGE_FILE *p, int32_t position) { return 0; } // Nieużywane
+
 // ===============================================================
 // === FUNKCJE APLIKACJI ===
 // ===============================================================
@@ -143,7 +151,13 @@ void initCamera() {
     .pin_d3 = Y5_GPIO_NUM, .pin_d2 = Y4_GPIO_NUM, .pin_d1 = Y3_GPIO_NUM,
     .pin_d0 = Y2_GPIO_NUM, .pin_vsync = VSYNC_GPIO_NUM, .pin_href = HREF_GPIO_NUM,
     .pin_pclk = PCLK_GPIO_NUM, .xclk_freq_hz = 20000000, .pixel_format = PIXFORMAT_JPEG,
-    .frame_size = FRAMESIZE_VGA, .jpeg_quality = 20, .fb_count = 1
+    
+    // === ZMIENIONO ===
+    // Ustawiono na QVGA, aby pasowało do rozmiaru przetwarzanych obrazów
+    .frame_size = FRAMESIZE_QVGA, // 320x240
+    // =================
+    
+    .jpeg_quality = 20, .fb_count = 1
   };
   if (esp_camera_init(&cfg) != ESP_OK) { Serial.println("[ERROR] Camera init failed"); while (true) delay(1000); } 
   else { Serial.println("[OK] Camera initialized successfully"); }
@@ -199,15 +213,12 @@ bool connectToNodeB() {
 }
 
 
-/**
- * @brief Dekoduje plik JPEG z karty SD do bufora w skali szarości.
- */
 uint8_t* decodeJpegToGrayscale(const char* path, uint16_t* out_width, uint16_t* out_height) {
   Serial.printf("[DECODE] Dekodowanie %s do grayscale (JPEGDEC)...\n", path);
 
   File jpgFile = SD.open(path, FILE_READ);
   if (!jpgFile) {
-    Serial.println("[DECODE ERROR] Nie można otworzyć pliku SD!");
+    Serial.printf("[DECODE ERROR] Nie można otworzyć pliku SD: %s\n", path);
     return nullptr;
   }
   
@@ -221,6 +232,14 @@ uint8_t* decodeJpegToGrayscale(const char* path, uint16_t* out_width, uint16_t* 
   
   *out_width = jpegDec.getWidth();
   *out_height = jpegDec.getHeight();
+
+  // === DODANO SPRAWDZENIE ROZDZIELCZOŚCI ===
+  if (*out_width != img_width || *out_height != img_height) {
+    Serial.printf("[DECODE ERROR] Niezgodność rozmiaru! Oczekiwano %dx%d, plik ma %dx%d\n", img_width, img_height, *out_width, *out_height);
+    jpegDec.close();
+    return nullptr;
+  }
+  // ==========================================
   
   global_gray_buf = (uint8_t*)heap_caps_malloc((*out_width) * (*out_height), MALLOC_CAP_SPIRAM);
   if (!global_gray_buf) {
@@ -230,12 +249,13 @@ uint8_t* decodeJpegToGrayscale(const char* path, uint16_t* out_width, uint16_t* 
   }
   global_img_width = *out_width;
 
-  jpegDec.setPixelType(RGB565_LITTLE_ENDIAN);
+  // === ZMIENIONO ===
+  // jpegDec.setPixelType(JPEG_GRAYSCALE); // BŁĄD: Zła stała
+  jpegDec.setPixelType(EIGHT_BIT_GRAYSCALE); // POPRAWKA: Użyj poprawnej stałej z biblioteki JPEGDEC
+  // =================
 
-  // === DODANO SPRAWDZANIE PAMIĘCI ===
   Serial.printf("[DECODE DEBUG] Przed dekodowaniem - Wolny Heap (wewn.): %d B\n", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
-  // Rozpocznij dekodowanie
   if (jpegDec.decode(0, 0, 0) != 1) {
     Serial.println("[DECODE ERROR] Błąd jpegDec.decode()!");
     heap_caps_free(global_gray_buf);
@@ -250,9 +270,6 @@ uint8_t* decodeJpegToGrayscale(const char* path, uint16_t* out_width, uint16_t* 
   return global_gray_buf;
 }
 
-/**
- * @brief Wysyła pełny obraz JPEG przez BLE i ładuje go do 'prev_gray'.
- */
 void sendFullImage(const char* path) {
   File f = SD.open(path, FILE_READ);
   if (!f) {
@@ -342,18 +359,52 @@ void sendFullImage(const char* path) {
   ackValue = 0x00;
 }
 
-void computeAndSendSparseJpegDiff() {
-  Serial.println("\n[computeDiff] Obliczanie diff dla /frame_2.jpg względem prev (tryb Sparse JPEG)...");
+// === ZMIENIONO ===
+// Funkcja przyjmuje teraz ścieżkę do pliku jako argument
+void computeAndSendSparseJpegDiff(const char* current_frame_path) {
+  Serial.printf("\n[computeDiff] Obliczanie diff dla %s względem prev (tryb Sparse JPEG)...\n", current_frame_path);
+  
+  // Logowanie wybranej metody i progu
+  if (currentDiffMethod == METHOD_MAD) {
+    Serial.printf("[computeDiff] Używana metoda: MAD (Próg: %.2f)\n", mad_threshold);
+  } else if (currentDiffMethod == METHOD_COSINE_DISTANCE) {
+    Serial.printf("[computeDiff] Używana metoda: Cosine Distance (Próg: %.4f)\n", cosine_dist_threshold);
+  } else if (currentDiffMethod == METHOD_MSE) {
+    Serial.printf("[computeDiff] Używana metoda: MSE (Próg: %.2f)\n", mse_threshold);
+  } else if (currentDiffMethod == METHOD_DSSIM) {
+    Serial.printf("[computeDiff] Używana metoda: DSSIM (Próg: %.4f)\n", dssim_threshold);
+  }
 
-  if (!prev_gray) { Serial.println("[computeDiff] BŁĄD: Bufor 'prev_gray' jest pusty!"); first_press = true; return; }
+  // Sprawdzenie bufora poprzedniej klatki
+  if (!prev_gray) { 
+    Serial.println("[computeDiff] BŁĄD: Bufor 'prev_gray' jest pusty!"); 
+    first_press = true; 
+    return; 
+  }
 
   uint16_t curr_w, curr_h;
-  uint8_t* curr_gray = decodeJpegToGrayscale("/frame_2.jpg", &curr_w, &curr_h); // Dekoduje do global_gray_buf
-  if (!curr_gray) { Serial.println("[computeDiff] BŁĄD: Nie udało się zdekodować /frame_2.jpg"); return; }
-  if (curr_w != img_width || curr_h != img_height) { Serial.println("[computeDiff] BŁĄD: Niezgodna rozdzielczość curr!"); return; }
+  // Dekodowanie aktualnej klatki
+  uint8_t* curr_gray = decodeJpegToGrayscale(current_frame_path, &curr_w, &curr_h); 
+  
+  if (!curr_gray) { 
+    Serial.printf("[computeDiff] BŁĄD: Nie udało się zdekodować %s\n", current_frame_path); 
+    return; 
+  }
+  
+  if (curr_w != img_width || curr_h != img_height) { 
+    Serial.println("[computeDiff] BŁĄD: Niezgodna rozdzielczość curr!"); 
+    heap_caps_free(curr_gray); 
+    return; 
+  }
 
+  // Alokacja bufora na wynikowy obraz "rzadki"
   uint8_t* sparse_gray_buf = (uint8_t*)heap_caps_malloc(img_width * img_height, MALLOC_CAP_SPIRAM);
-  if (!sparse_gray_buf) { Serial.println("[computeDiff] BŁĄD: Brak pamięci na sparse_gray_buf!"); return; }
+  if (!sparse_gray_buf) { 
+    Serial.println("[computeDiff] BŁĄD: Brak pamięci na sparse_gray_buf!"); 
+    heap_caps_free(curr_gray); 
+    return; 
+  }
+  // Wypełnij tłem (0x00)
   memset(sparse_gray_buf, sparse_background_color, img_width * img_height);
 
   int rows = img_height / block_size;
@@ -361,120 +412,215 @@ void computeAndSendSparseJpegDiff() {
   int changed_count = 0;
   unsigned long diff_start_time = millis();
 
+  // --- GŁÓWNA PĘTLA PO BLOKACH ---
   for (int i = 0; i < rows; i++) {
     for (int j = 0; j < cols; j++) {
       int y = i * block_size, x = j * block_size;
+      
       if (y + block_size > img_height || x + block_size > img_width) continue;
-      uint8_t* block_prev = prev_gray + y * img_width + x;
-      uint8_t* block_curr = curr_gray + y * img_width + x;
-      float mad = 0.0;
-      for (int k = 0; k < block_size; k++) { for (int m = 0; m < block_size; m++) {
-          if (((y + k) * img_width + (x + m)) >= (img_width * img_height)) continue;
-          mad += abs(block_curr[k * img_width + m] - block_prev[k * img_width + m]); } }
-      mad /= (block_size * block_size);
-      if (mad > mad_threshold) { changed_count++;
+      
+      bool is_block_changed = false;
+
+      // =========================================================
+      // === LOGIKA DETEKCJI ZMIAN - WYBÓR ALGORYTMU ===
+      // =========================================================
+      
+      if (currentDiffMethod == METHOD_MAD) {
+        // --- METODA 1: MAD (Mean Absolute Difference) ---
+        float mad = 0.0;
+        for (int k = 0; k < block_size; k++) { 
+            for (int m = 0; m < block_size; m++) {
+                uint32_t pixel_idx = (y + k) * img_width + (x + m);
+                mad += abs(curr_gray[pixel_idx] - prev_gray[pixel_idx]); 
+            } 
+        }
+        mad /= (block_size * block_size);
+        if (mad > mad_threshold) is_block_changed = true;
+
+      } else if (currentDiffMethod == METHOD_COSINE_DISTANCE) {
+        // --- METODA 2: Cosine Distance ---
+        double dot_product = 0.0;
+        double norm_prev_sq = 0.0;
+        double norm_curr_sq = 0.0;
+
+        for (int k = 0; k < block_size; k++) { 
+            for (int m = 0; m < block_size; m++) {
+                uint32_t pixel_idx = (y + k) * img_width + (x + m);
+                uint8_t val_prev = prev_gray[pixel_idx];
+                uint8_t val_curr = curr_gray[pixel_idx];
+
+                dot_product += (double)val_prev * val_curr;
+                norm_prev_sq += (double)val_prev * val_prev;
+                norm_curr_sq += (double)val_curr * val_curr;
+            }
+        }
+
+        double similarity = 0.0;
+        if (norm_prev_sq == 0 && norm_curr_sq == 0) similarity = 1.0; 
+        else if (norm_prev_sq == 0 || norm_curr_sq == 0) similarity = 0.0; 
+        else similarity = dot_product / (sqrt(norm_prev_sq) * sqrt(norm_curr_sq));
+
+        double distance = 1.0 - similarity;
+        if (distance > cosine_dist_threshold) is_block_changed = true;
+
+      } else if (currentDiffMethod == METHOD_MSE) {
+        // --- METODA 3: MSE (Mean Squared Error) ---
+        float mse = 0.0;
+        for (int k = 0; k < block_size; k++) { 
+            for (int m = 0; m < block_size; m++) {
+                uint32_t pixel_idx = (y + k) * img_width + (x + m);
+                int16_t diff = (int16_t)curr_gray[pixel_idx] - (int16_t)prev_gray[pixel_idx];
+                mse += (diff * diff); 
+            } 
+        }
+        mse /= (block_size * block_size);
+        if (mse > mse_threshold) is_block_changed = true;
+
+      } else if (currentDiffMethod == METHOD_DSSIM) {
+        // --- METODA 4: DSSIM (Structural Dissimilarity) ---
+        // Implementacja SSIM dla bloku.
+        // Stałe C1 i C2 dla L=255, K1=0.01, K2=0.03
+        const float C1 = 6.5025f;  
+        const float C2 = 58.5225f; 
+
+        float sum_p = 0, sum_c = 0;
+        float sum_sq_p = 0, sum_sq_c = 0, sum_pc = 0;
+        int num_pixels = block_size * block_size;
+
+        for (int k = 0; k < block_size; k++) { 
+            for (int m = 0; m < block_size; m++) {
+                uint32_t pixel_idx = (y + k) * img_width + (x + m);
+                float val_prev = (float)prev_gray[pixel_idx];
+                float val_curr = (float)curr_gray[pixel_idx];
+
+                sum_p += val_prev;
+                sum_c += val_curr;
+                sum_sq_p += val_prev * val_prev;
+                sum_sq_c += val_curr * val_curr;
+                sum_pc += val_prev * val_curr;
+            } 
+        }
+
+        float mu_p = sum_p / num_pixels;
+        float mu_c = sum_c / num_pixels;
+
+        // Wariancje i kowariancja
+        float sigma_sq_p = (sum_sq_p / num_pixels) - (mu_p * mu_p);
+        float sigma_sq_c = (sum_sq_c / num_pixels) - (mu_c * mu_c);
+        float sigma_pc = (sum_pc / num_pixels) - (mu_p * mu_c);
+
+        // SSIM
+        float numerator = (2 * mu_p * mu_c + C1) * (2 * sigma_pc + C2);
+        float denominator = (mu_p * mu_p + mu_c * mu_c + C1) * (sigma_sq_p + sigma_sq_c + C2);
+        float ssim = numerator / denominator;
+
+        // DSSIM (Distance): 0 = identyczne, 1 = max różnica
+        float dssim = (1.0f - ssim) / 2.0f;
+
+        if (dssim > dssim_threshold) is_block_changed = true;
+      }
+      
+      // =========================================================
+
+      // Jeśli wykryto zmianę, skopiuj blok do bufora sparse
+      if (is_block_changed) {
+        changed_count++;
         for (int k = 0; k < block_size; k++) {
-           if (((y + k) * img_width + x + block_size) > (img_width * img_height)) continue;
-           memcpy(sparse_gray_buf + (y + k) * img_width + x, curr_gray + (y + k) * img_width + x, block_size); } }
+          int_fast32_t offset = (y + k) * img_width + x;
+          uint8_t* src_ptr = curr_gray + offset;
+          uint8_t* dst_ptr = sparse_gray_buf + offset;
+          for (int m = 0; m < block_size; m++) {
+            if (*src_ptr == 0x00) {
+              *dst_ptr = 0x01; // Zachowaj 0x00 dla tła
+            } else {
+              *dst_ptr = *src_ptr; 
+            }
+            src_ptr++;
+            dst_ptr++;
+          }
+        }
+      }
     }
   }
   Serial.printf("[computeDiff] Czas obliczania diff: %lu ms\n", millis() - diff_start_time);
   Serial.printf("[computeDiff] Zmienione bloki: %d / %d\n", changed_count, rows * cols);
 
-  // Aktualizacja prev_gray PRZED kodowaniem
+  // Aktualizacja referencji
   heap_caps_free(prev_gray);
-  prev_gray = (uint8_t*)heap_caps_malloc(img_width * img_height, MALLOC_CAP_SPIRAM);
-  if (!prev_gray) { Serial.println("[computeDiff] BŁĄD: Brak pamięci na nowy prev_gray!"); heap_caps_free(sparse_gray_buf); return; }
-  memcpy(prev_gray, curr_gray, img_width * img_height);
+  prev_gray = curr_gray; 
 
-  if (changed_count == 0) { Serial.println("[computeDiff] Brak zmian - pomijam wysyłanie."); heap_caps_free(sparse_gray_buf); return; }
+  if (changed_count == 0) { 
+    Serial.println("[computeDiff] Brak zmian - pomijam wysyłanie."); 
+    heap_caps_free(sparse_gray_buf); 
+    return; 
+  }
 
-  // --- POPRAWIONY BLOK KODOWANIA JPEGENC (zgodnie z przykładem) ---
+  // --- KODOWANIE JPEG (Sparse) ---
   Serial.println("[JPEGENC] Rozpoczynam kodowanie Sparse JPEG...");
   unsigned long encode_start_time = millis();
   int result = JPEGE_SUCCESS;
-  JPEGENCODE jpe; // Struktura pomocnicza
+  JPEGENCODE jpe; 
 
-  // 1. Otwórz koder, używając callbacków do zapisu w pamięci (wektorze)
   result = jpegEnc.open("memory", myJpegEncOpen, myJpegEncClose, myJpegEncRead, myJpegEncWrite, myJpegEncSeek);
 
   if (result == JPEGE_SUCCESS) {
-      Serial.println("[JPEGENC] Koder otwarty pomyślnie.");
-      // 2. Rozpocznij kodowanie, ustawiając parametry
       int quality_level;
-      // Mapowanie 0-100 na stałe JPEGE_Q_...
       if (jpeg_encode_quality >= 90) quality_level = JPEGE_Q_BEST;
       else if (jpeg_encode_quality >= 75) quality_level = JPEGE_Q_HIGH;
       else if (jpeg_encode_quality >= 50) quality_level = JPEGE_Q_MED;
       else quality_level = JPEGE_Q_LOW;
 
-      // Użyj stałej JPEGE_PIXEL_GRAYSCALE
       result = jpegEnc.encodeBegin(&jpe, img_width, img_height, JPEGE_PIXEL_GRAYSCALE, JPEGE_SUBSAMPLE_444, quality_level);
 
       if (result == JPEGE_SUCCESS) {
-          Serial.println("[JPEGENC] Nagłówek JPEG zapisany.");
-          // 3. Koduj blok po bloku (MCU)
-          int mcu_w = jpe.cx; // 8
-          int mcu_h = jpe.cy; // 8
-          int stride = img_width;
-          uint8_t mcu_buffer[mcu_w * mcu_h]; // Bufor 8x8
+          int mcu_w = jpe.cx; int mcu_h = jpe.cy; int stride = img_width;
+          uint8_t mcu_buffer[mcu_w * mcu_h]; 
 
           int mcu_rows = (img_height + mcu_h - 1) / mcu_h;
           int mcu_cols = (img_width + mcu_w - 1) / mcu_w;
 
           for (int mcu_y = 0; mcu_y < mcu_rows && result == JPEGE_SUCCESS; mcu_y++) {
               for (int mcu_x = 0; mcu_x < mcu_cols && result == JPEGE_SUCCESS; mcu_x++) {
-                  int src_y_start = mcu_y * mcu_h;
-                  int src_x_start = mcu_x * mcu_w;
-                  // Kopiowanie bloku 8x8 z sparse_gray_buf do mcu_buffer z obsługą krawędzi
+                  int src_y_start = mcu_y * mcu_h; int src_x_start = mcu_x * mcu_w;
                   for (int y_in_mcu = 0; y_in_mcu < mcu_h; y_in_mcu++) {
                       int src_y = src_y_start + y_in_mcu;
                       if (src_y < img_height) {
                           uint8_t *src_ptr = sparse_gray_buf + src_y * stride + src_x_start;
                           uint8_t *dst_ptr = mcu_buffer + y_in_mcu * mcu_w;
                           int copy_len = mcu_w;
-                          if (src_x_start + mcu_w > img_width) { copy_len = img_width - src_x_start; }
+                          if (src_x_start + mcu_w > img_width) copy_len = img_width - src_x_start;
                           memcpy(dst_ptr, src_ptr, copy_len);
-                          if (copy_len < mcu_w) { memset(dst_ptr + copy_len, sparse_background_color, mcu_w - copy_len); }
+                          if (copy_len < mcu_w) memset(dst_ptr + copy_len, sparse_background_color, mcu_w - copy_len);
                       } else {
                           memset(mcu_buffer + y_in_mcu * mcu_w, sparse_background_color, mcu_w);
                       }
                   }
-                  // Dodaj (zakoduj) MCU
                   result = jpegEnc.addMCU(&jpe, mcu_buffer, mcu_w);
               }
           }
-      } else {
-          Serial.printf("[JPEGENC ERROR] Błąd jpegEnc.encodeBegin()! Kod: %d\n", result);
       }
-      // 4. Zamknij koder
       jpegEnc.close();
-
-  } else {
-      Serial.printf("[JPEGENC ERROR] Błąd jpegEnc.open()! Kod: %d\n", result);
   }
 
   unsigned long encode_time = millis() - encode_start_time;
-  heap_caps_free(sparse_gray_buf); // Zwolnij bufor sparse PO kodowaniu
+  heap_caps_free(sparse_gray_buf); 
 
-  // Sprawdź wynik kodowania (JPEGE_DONE też jest ok)
-  if (result != JPEGE_SUCCESS) { // Sprawdź JPEGE_DONE
+  if (result != JPEGE_SUCCESS) { 
       Serial.printf("[JPEGENC ERROR] Kodowanie nie powiodło się! Ostatni kod: %d\n", result);
       encodedJpegData.clear();
       return;
   }
-  // --- KONIEC POPRAWIONEGO BLOKU KODOWANIA ---
 
   uint32_t encoded_size = encodedJpegData.size();
   Serial.printf("[JPEGENC OK] Kodowanie zakończone (%lu B) w %lu ms.\n", encoded_size, encode_time);
 
-  // Wysyłanie Sparse JPEG przez BLE
+  // --- WYSYŁANIE BLE ---
   uint16_t totalPkts = (encoded_size + PAYLOAD_SIZE - 1) / PAYLOAD_SIZE;
   Serial.printf("[sendSparse] Wysyłanie Sparse JPEG: Rozmiar: %u B, Pakiety: %u\n", encoded_size, totalPkts);
 
   BleHeader header;
   header.magic_start[0] = 0xAB; header.magic_start[1] = 0xCD;
-  header.tx_type = BLE_TX_TYPE_SPARSE_JPEG; // Użyj NOWEGO typu
+  header.tx_type = BLE_TX_TYPE_SPARSE_JPEG; 
   header.data_size = encoded_size;
   header.width = img_width; header.height = img_height;
   header.block_size = block_size;
@@ -482,34 +628,32 @@ void computeAndSendSparseJpegDiff() {
 
   ackValue = 0x00;
   pCharRx->writeValue((uint8_t*)&header, sizeof(header), false);
-  Serial.println("[sendSparse] Wysłano nagłówek. Czekam na ACK...");
+  
   unsigned long startWait = millis();
   while (ackValue != 0x01 && millis() - startWait < 2000) { delay(10); }
   if (ackValue != 0x01) { Serial.println("[sendSparse] Timeout ACK nagłówka!"); return; }
 
-  Serial.println("[sendSparse] ACK nagłówka OK. Wysyłam dane Sparse JPEG...");
   size_t offset = 0;
   while (offset < encoded_size) {
     size_t len = min(PAYLOAD_SIZE, encoded_size - offset);
-    if (offset + len > encodedJpegData.size()) { Serial.printf("[sendSparse ERROR] Próba odczytu poza wektorem! offset=%zu, len=%zu, size=%zu\n", offset, len, encodedJpegData.size()); break; }
     pCharRx->writeValue(&encodedJpegData[offset], len, false);
     offset += len;
     delay(5);
   }
 
-  Serial.println("[sendSparse] Dane Sparse JPEG wysłane. Czekam na finalny ACK...");
   startWait = millis();
   while (ackValue != 0xAA && millis() - startWait < 8000) { delay(10); }
   if (ackValue == 0xAA) { Serial.println("[sendSparse] Finalny ACK OK."); }
   else { Serial.printf("[sendSparse] Timeout finalny ACK: 0x%02X\n", ackValue); resetBLEClient(); }
   ackValue = 0x00;
-  // prev_gray jest już zaktualizowany
 }
+
 /**
  * @brief Oblicza różnice (diff) i wysyła je przez BLE.
+ * === ZMIENIONO: Ta funkcja również została zaktualizowana, aby przyjmować ścieżkę ===
  */
-void computeAndSendDiff() {
-  Serial.println("\n[computeDiff] Obliczanie diff dla /frame_2.jpg względem prev...");
+void computeAndSendDiff(const char* current_frame_path) {
+  Serial.printf("\n[computeDiff] Obliczanie diff dla %s względem prev...\n", current_frame_path);
 
   if (!prev_gray) {
     Serial.println("[computeDiff] BŁĄD: Bufor 'prev_gray' jest pusty (nullptr)!");
@@ -518,11 +662,11 @@ void computeAndSendDiff() {
     return;
   }
   
-  // Dekoduj curr (frame_2)
+  // Dekoduj curr (używając ścieżki)
   uint16_t curr_w, curr_h;
-  uint8_t* curr_gray = decodeJpegToGrayscale("/frame_2.jpg", &curr_w, &curr_h);
+  uint8_t* curr_gray = decodeJpegToGrayscale(current_frame_path, &curr_w, &curr_h);
   if (!curr_gray) {
-      Serial.println("[computeDiff] BŁĄD: Nie udało się zdekodować /frame_2.jpg");
+      Serial.printf("[computeDiff] BŁĄD: Nie udało się zdekodować %s\n", current_frame_path);
       return;
   }
   if (curr_w != img_width || curr_h != img_height) {
@@ -552,7 +696,7 @@ void computeAndSendDiff() {
       }
       mad /= (block_size * block_size);
 
-      Serial.printf("[computeDiff BLOCK %d,%d] MAD: %.2f\n", i, j, mad);
+      // Serial.printf("[computeDiff BLOCK %d,%d] MAD: %.2f\n", i, j, mad); // Trochę zbyt szczegółowe
 
       if (mad > mad_threshold) {
         changed_count++;
@@ -618,15 +762,40 @@ void computeAndSendDiff() {
 
 /**
  * @brief Główna funkcja wyzwalana przyciskiem.
+ * === ZMIENIONO: Cała logika sekwencji plików jest tutaj ===
  */
 void captureAndProcessImage() {
-  Serial.println("\n[ACTION] Uruchamiam proces transmisji...");
-  Serial.printf("[ACTION] Aktualny stan flagi first_press: %s\n", first_press ? "true" : "false");
-  if (first_press) {
-    sendFullImage("/frame_1.jpg");
-  } else {
-    computeAndSendSparseJpegDiff();
+  
+  // Sprawdź, czy sekwencja się nie skończyła
+  if (current_frame_index > max_frame_index) {
+    current_frame_index = 1; // Zresetuj do pierwszej klatki
+    first_press = true;    // Wymuś ponowne wysłanie pełnej klatki bazowej
+    Serial.println("\n[ACTION] Sekwencja zakończona. Restartuję od klatki bazowej.");
   }
+
+  // Wygeneruj nazwę pliku na podstawie aktualnego indeksu
+  // Format: /frame_qvga_2746004_0001.jpg
+  sprintf(current_filename_buffer, "%s%04d%s", base_filename, current_frame_index, file_extension);
+
+  Serial.printf("\n[ACTION] Przycisk wciśnięty. Przetwarzam plik: %s\n", current_filename_buffer);
+  Serial.printf("[ACTION] Aktualny stan flagi first_press: %s\n", first_press ? "true" : "false");
+
+  if (first_press) {
+    // Upewnij się, że na pewno wysyłamy pierwszą klatkę jako bazową
+    if (current_frame_index != 1) {
+        Serial.println("[ACTION ERROR] Niespójność stanu! first_press=true, ale indeks != 1. Resetuję.");
+        current_frame_index = 1;
+        first_press = true;
+        sprintf(current_filename_buffer, "%s%04d%s", base_filename, current_frame_index, file_extension);
+    }
+    sendFullImage(current_filename_buffer);
+  } else {
+    // Wyślij klatkę różnicową
+    computeAndSendSparseJpegDiff(current_filename_buffer);
+  }
+
+  // Przygotuj się na następne naciśnięcie przycisku
+  current_frame_index++;
 }
 
 // ===============================================================
@@ -668,7 +837,7 @@ void loop() {
   if ((millis() - lastDebounceTime) > debounceDelay) {
     if (reading != buttonState) {
       buttonState = reading;
-      if (buttonState == LOW) {
+      if (buttonState == LOW) { // Przycisk wciśnięty (LOW, bo PULLUP)
         captureAndProcessImage();
       }
     }
