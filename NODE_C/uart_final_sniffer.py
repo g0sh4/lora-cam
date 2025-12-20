@@ -9,7 +9,7 @@ import numpy as np    # <--- Przywrócono import
 SERIAL_PORT = 'COM11' # Zmień na swój port
 BAUD_RATE = 115200
 START_MARKER = 'START_IMAGE_TRANSFER'
-RESULTS_DIR = "wyniki_testow"
+RESULTS_DIR = "tests_home_cam"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # Kolor tła użyty w kodzie C++ (Node A)
@@ -140,7 +140,7 @@ def main():
                                 last_width = image_width
                                 last_height = image_height
                                 last_block_size = block_size
-                                filename_prefix = f"base_frame_{image_timestamp}"
+                                filename_prefix = f"base_frame_MAD_uczelnia_16_10_{image_timestamp}"
                                 log("[+] Obraz bazowy zapisany w pamięci.")
 
                             except Exception as e:
@@ -173,7 +173,7 @@ def main():
                                 updated_image = apply_sparse_jpeg(base_image_pil, image_data, SPARSE_BACKGROUND_COLOR)
                                 if updated_image:
                                     base_image_pil = updated_image # Aktualizuj bazę
-                                    filename_prefix = f"updated_frame_DSSIM_14719992_16_005_{image_timestamp}"
+                                    filename_prefix = f"updated_frame_MAD_uczelnia_16_10_{image_timestamp}"
                                 else:
                                     log("[!] Nie udało się nałożyć zmian Sparse. Zapisuję tylko surowy plik diff.")
                                     filename_prefix = f"error_diff_frame_{image_timestamp}"
