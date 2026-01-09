@@ -2,9 +2,9 @@
 #include <SPI.h>
 #include <RadioLib.h>
 #include <vector>
-#include "frame_structure.h"
+#include "frame_structure.h" // Upewnij się, że masz ten plik w folderze projektu
 
-// --- PINY ---
+// --- KONFIGURACJA PINÓW (SX1262) ---
 #define LORA_SCK_PIN 7
 #define LORA_MISO_PIN 8
 #define LORA_MOSI_PIN 9
@@ -13,7 +13,7 @@
 #define LORA_DIO1_PIN 39
 #define LORA_RST_PIN 42
 
-// --- START NA SF12 ---
+// --- KONFIGURACJA LORA (START NA SF12) ---
 #define CONTROL_SF 12
 #define LORA_FREQUENCY 868.0
 #define LORA_BANDWIDTH 125.0
@@ -24,9 +24,11 @@
 Module mod(LORA_NSS_PIN, LORA_DIO1_PIN, LORA_RST_PIN, LORA_BUSY_PIN);
 SX1262 radio(&mod);
 
-enum NodeCState { C_IDLE, C_RECEIVING, C_SENDING_RESPONSE };
+// --- STANY ---
+enum NodeCState { C_IDLE, C_RECEIVING };
 NodeCState cState = C_IDLE;
 
+// --- ZMIENNE SESJI ---
 uint8_t currentTransactionId = 255;
 uint8_t currentSF = CONTROL_SF; 
 
@@ -38,7 +40,29 @@ uint16_t imageWidth = 0; uint16_t imageHeight = 0; uint8_t blockSize = 0;
 std::vector<uint8_t> imageBuffer;
 std::vector<bool> packetsReceived;
 
-// Prototypy
+// --- STRUKTURA DO STATYSTYK ---
+struct LinkStats {
+    float rssi_min;
+    float rssi_max;
+    float rssi_sum;
+    float snr_min;
+    float snr_max;
+    float snr_sum;
+    uint32_t total_toa;
+    uint16_t frames_count;
+    
+    // Historia retransmisji (ile pakietów brakowało w każdej próbie NACK)
+    std::vector<uint16_t> retransmissions; 
+    
+    void reset() {
+        rssi_min = 0; rssi_max = -200; rssi_sum = 0;
+        snr_min = 0; snr_max = -200; snr_sum = 0;
+        total_toa = 0; frames_count = 0;
+        retransmissions.clear();
+    }
+} stats;
+
+// --- PROTOTYPY ---
 void setLoRaModeRx(uint8_t sf);
 void setLoRaModeTx(uint8_t sf);
 void handleReceivedPacket(int packetSize);
@@ -46,10 +70,11 @@ void sendGrant(uint8_t targetSF);
 void sendNackOrAck();
 void sendImageToComputer();
 void resetReceiverState();
+void updateStats(float rssi, float snr, uint32_t toa);
 
 void setup() {
     Serial.begin(115200); delay(2000);
-    Serial.println("Starting Node C (Receiver Bitfields + 500ms Delay)...");
+    Serial.println("Starting Node C (Receiver + FULL STATS)...");
     
     pinMode(LED_BUILTIN, OUTPUT);
     pinMode(LORA_RST_PIN, OUTPUT);
@@ -62,7 +87,7 @@ void setup() {
 
     radio.setFrequency(LORA_FREQUENCY);
     radio.setBandwidth(LORA_BANDWIDTH);
-    radio.setSpreadingFactor(CONTROL_SF); // SF12
+    radio.setSpreadingFactor(CONTROL_SF); 
     radio.setCodingRate(LORA_CODING_RATE);
     radio.setSyncWord(LORA_SYNC_WORD);
     radio.setOutputPower(14);
@@ -70,20 +95,37 @@ void setup() {
     radio.setCRC(true);
     radio.explicitHeader();
     
+    stats.reset();
+
     Serial.printf("[LORA] Gotowy. Nasłuch na SF%d (Control)\n", CONTROL_SF);
     radio.startReceive();
 }
 
 void loop() {
-    // Polling DIO1
     if (digitalRead(LORA_DIO1_PIN) == HIGH) {
         int packetSize = radio.getPacketLength();
         if (packetSize > 0) {
-            digitalWrite(LED_BUILTIN, LOW); // Mignięcie
+            digitalWrite(LED_BUILTIN, LOW);
             handleReceivedPacket(packetSize);
             digitalWrite(LED_BUILTIN, HIGH);
         }
     }
+}
+
+void updateStats(float rssi, float snr, uint32_t toa) {
+    if (stats.frames_count == 0) {
+        stats.rssi_min = rssi; stats.rssi_max = rssi;
+        stats.snr_min = snr; stats.snr_max = snr;
+    } else {
+        if (rssi < stats.rssi_min) stats.rssi_min = rssi;
+        if (rssi > stats.rssi_max) stats.rssi_max = rssi;
+        if (snr < stats.snr_min) stats.snr_min = snr;
+        if (snr > stats.snr_max) stats.snr_max = snr;
+    }
+    stats.rssi_sum += rssi;
+    stats.snr_sum += snr;
+    stats.total_toa += toa;
+    stats.frames_count++;
 }
 
 void handleReceivedPacket(int packetSize) {
@@ -93,46 +135,48 @@ void handleReceivedPacket(int packetSize) {
     int state = radio.readData(packetBuffer, packetSize);
     if (state != RADIOLIB_ERR_NONE) { 
         Serial.printf("[RX] Blad CRC: %d\n", state);
-        setLoRaModeRx(currentSF); 
-        return; 
+        setLoRaModeRx(currentSF); return; 
     }
 
-    // Rzutowanie na strukturę bitową
     LoRaHeader* header = (LoRaHeader*)packetBuffer;
     float snr = radio.getSNR();
     float rssi = radio.getRSSI();
+    uint32_t rxToA = radio.getTimeOnAir(packetSize) / 1000; 
 
-    // Logowanie ramek sterujących
-    if (header->frame_type != FRAME_TYPE_DATA) {
-        Serial.printf("[%lu][RX] ID: %u | Typ: %u | SF: %d | RSSI: %.1f | SNR: %.2f\n", 
-                      millis(), header->transaction_id, header->frame_type, currentSF, rssi, snr);
+    // Logowanie podstawowe
+    Serial.printf("[%lu][RX] ID:%u T:%u S:%u SF:%d R:%.1f S:%.2f ToA:%lu\n", 
+                  millis(), header->transaction_id, header->frame_type, header->sequence_num, currentSF, rssi, snr, rxToA);
+
+    // Zbieranie statystyk (tylko dla aktywnej transakcji lub nowego STARTu)
+    if ((cState == C_RECEIVING && header->transaction_id == currentTransactionId) || 
+        (cState == C_IDLE && header->frame_type == FRAME_TYPE_START)) {
+        
+        // Reset statystyk przy nowym START
+        if (cState == C_IDLE && header->frame_type == FRAME_TYPE_START) stats.reset();
+        
+        updateStats(rssi, snr, rxToA);
     }
 
-    // --- STAN: IDLE (Nasłuch na SF12) ---
+    // --- MASZYNA STANÓW ---
     if (cState == C_IDLE) {
         if (header->frame_type == FRAME_TYPE_START) {
-            size_t offset = sizeof(LoRaHeader); 
-            // Tuż po 2 bajtach nagłówka mamy metadane
-            
-            // offset to 2. Metadane: [txType(1)][width(2)][height(2)][block(1)][pkts(2)][size(4)]
-            offset++; // skip txType
+            // Parsowanie Payloadu START: Width(2), Height(2), Block(1), PktCnt(2), ImgSize(4)
+            size_t offset = sizeof(LoRaHeader) + 1; // +1 pomija txType
             imageWidth = *(uint16_t*)(packetBuffer + offset); offset += 2;
-            imageHeight = *(uint16_t*)(packetBuffer + offset); offset += 2; offset++; // skip block
+            imageHeight = *(uint16_t*)(packetBuffer + offset); offset += 2; 
+            blockSize = *(uint8_t*)(packetBuffer + offset); offset++; // To pole mogło być pominięte we wcześniejszej wersji, upewnij się
             expectedPacketCount = *(uint16_t*)(packetBuffer + offset); offset += 2;
             expectedImageSize = *(uint32_t*)(packetBuffer + offset);
 
-            Serial.printf("[AITP] Nowa sesja. Rozmiar: %u B. Pakiety: %u\n", expectedImageSize, expectedPacketCount);
+            Serial.printf("[AITP] START. Size:%u Pkts:%u. Deciding SF...\n", expectedImageSize, expectedPacketCount);
 
-            // --- ALGORYTM DOBORU SF ---
-            uint8_t selectedSF = 12; // Domyślnie bezpieczne
-
+            // Adaptacja SF
+            uint8_t selectedSF = 12; 
             if (snr > -6.0) selectedSF = 7; 
             else if (snr > -9.0) selectedSF = 8;
             else if (snr > -11.5) selectedSF = 9;
             else if (snr > -14.0) selectedSF = 10;
-            else selectedSF = 12;
-            
-            Serial.printf("[DECISION] Wybrano: SF%d\n", selectedSF);
+            else if (snr > -16.0) selectedSF = 11;
             
             currentTransactionId = header->transaction_id;
             imageBuffer.clear();
@@ -145,10 +189,8 @@ void handleReceivedPacket(int packetSize) {
             cState = C_RECEIVING;
             currentSF = selectedSF;
             setLoRaModeRx(currentSF);
-            Serial.printf("[LORA] Przelaczono nasluch na SF%d\n", currentSF);
         }
     } 
-    // --- STAN: RECEIVING ---
     else if (cState == C_RECEIVING) {
         if (header->transaction_id != currentTransactionId) { setLoRaModeRx(currentSF); return; }
 
@@ -161,32 +203,28 @@ void handleReceivedPacket(int packetSize) {
                     memcpy(&imageBuffer[off], &packetBuffer[sizeof(LoRaHeader)], dSize);
                     packetsReceived[seq] = true;
                     receivedPacketCount++;
-                    if(receivedPacketCount % 5 == 0) Serial.print(".");
                 }
             }
             setLoRaModeRx(currentSF);
         }
         else if (header->frame_type == FRAME_TYPE_END || header->frame_type == FRAME_TYPE_RE_END) {
-            Serial.println("\n[RX] Otrzymano END. Weryfikacja brakow...");
             sendNackOrAck();
         }
     }
 }
 
 void sendGrant(uint8_t targetSF) {
-    setLoRaModeTx(CONTROL_SF); // SF12
-    delay(500); // 500ms opóźnienia dla NODE_B!
-    
+    setLoRaModeTx(CONTROL_SF); 
+    delay(500); 
     uint8_t buf[sizeof(LoRaHeader) + 1];
     LoRaHeader* h = (LoRaHeader*)buf;
     h->transaction_id = currentTransactionId & 0x07;
     h->frame_type = FRAME_TYPE_ACK & 0x07;
     h->sequence_num = 0;
-    
-    buf[sizeof(LoRaHeader)] = targetSF; // Payload: Wybrane SF
+    buf[sizeof(LoRaHeader)] = targetSF; 
     
     radio.transmit(buf, sizeof(buf));
-    Serial.printf("[%lu][TX] GRANT wyslany na SF12. Payload: SF%d\n", millis(), targetSF);
+    // Nie przełączamy na Rx tutaj, zrobimy to po powrocie do funkcji wywołującej
 }
 
 void sendNackOrAck() {
@@ -194,10 +232,15 @@ void sendNackOrAck() {
     for (uint16_t i = 0; i < expectedPacketCount; i++) if (!packetsReceived[i]) missing.push_back(i);
     delay(20);
 
+    // Rejestracja retransmisji
+    if (!missing.empty()) {
+        stats.retransmissions.push_back((uint16_t)missing.size());
+    }
+
     setLoRaModeTx(currentSF); 
     
     if (missing.empty()) {
-        Serial.println("[TX] ACK FULL. Sukces.");
+        // ACK
         uint8_t ack[sizeof(LoRaHeader)];
         LoRaHeader* h = (LoRaHeader*)ack;
         h->transaction_id = currentTransactionId & 0x07;
@@ -205,32 +248,61 @@ void sendNackOrAck() {
         h->sequence_num = 0;
         
         radio.transmit(ack, sizeof(ack));
+        Serial.println("[TX] ACK FULL. Transfer ukonczony.");
         
         sendImageToComputer();
         resetReceiverState();
     } else {
-        Serial.printf("[TX] NACK: Brakuje %u pakietow.\n", missing.size());
+        // NACK
+        Serial.printf("[TX] NACK. Brak %u pkt. Próba #%u\n", missing.size(), stats.retransmissions.size());
         
         size_t count = min((size_t)missing.size(), (size_t)((255 - sizeof(LoRaHeader)-3)/2));
         size_t pSize = sizeof(LoRaHeader) + 3 + (count * 2);
-        uint8_t nack[pSize];
-        LoRaHeader* h = (LoRaHeader*)nack;
+        
+        // Dynamiczna alokacja tablicy na stosie (VLA) lub vector
+        std::vector<uint8_t> nackBuf(pSize);
+        LoRaHeader* h = (LoRaHeader*)nackBuf.data();
         h->transaction_id = currentTransactionId & 0x07;
         h->frame_type = FRAME_TYPE_NACK & 0x07;
         h->sequence_num = 0;
         
         size_t off = sizeof(LoRaHeader);
-        nack[off++] = currentSF; // Opcjonalnie: prośba o zmianę SF
-        *(uint16_t*)(nack + off) = (uint16_t)count; off += 2;
-        memcpy(nack + off, missing.data(), count * 2);
+        nackBuf[off++] = currentSF; 
+        *(uint16_t*)(nackBuf.data() + off) = (uint16_t)count; off += 2;
+        memcpy(nackBuf.data() + off, missing.data(), count * 2);
         
-        radio.transmit(nack, pSize);
+        radio.transmit(nackBuf.data(), pSize);
         setLoRaModeRx(currentSF);
     }
 }
 
 void sendImageToComputer() {
     if (imageBuffer.empty()) return;
+    
+    // Obliczenia średnich
+    float avgRssi = (stats.frames_count > 0) ? (stats.rssi_sum / stats.frames_count) : 0.0;
+    float avgSnr = (stats.frames_count > 0) ? (stats.snr_sum / stats.frames_count) : 0.0;
+    
+    // Budowanie historii retransmisji (CSV z średnikami)
+    String nackHistoryStr = "";
+    if (stats.retransmissions.empty()) {
+        nackHistoryStr = "0";
+    } else {
+        for (size_t i = 0; i < stats.retransmissions.size(); i++) {
+            nackHistoryStr += String(stats.retransmissions[i]);
+            if (i < stats.retransmissions.size() - 1) nackHistoryStr += ";";
+        }
+    }
+
+    // Format: STATS_DATA:minR,maxR,avgR,minS,maxS,avgS,cnt,ToA,nackCnt,nackHist
+    Serial.printf("STATS_DATA:%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%lu,%u,%s\n",
+        stats.rssi_min, stats.rssi_max, avgRssi,
+        stats.snr_min, stats.snr_max, avgSnr,
+        stats.frames_count, stats.total_toa,
+        stats.retransmissions.size(),
+        nackHistoryStr.c_str()
+    );
+
     Serial.print("START_IMAGE_TRANSFER\n");
     Serial.printf("%u,%u,%u,%u\n", expectedImageSize, imageWidth, imageHeight, blockSize);
     Serial.write(imageBuffer.data(), imageBuffer.size());
@@ -244,6 +316,7 @@ void resetReceiverState() {
     imageBuffer.clear();
     packetsReceived.clear();
     currentSF = CONTROL_SF; 
+    stats.reset(); 
     setLoRaModeRx(currentSF);
-    Serial.println("[AITP] Reset stanu. Nasluch na SF12 (Control).");
+    Serial.println("[AITP] Reset. Nasluch SF12.");
 }

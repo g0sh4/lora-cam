@@ -11,6 +11,43 @@
 #include <JPEGDEC.h>
 #include "ble_frame_structure.h" // Twój plik nagłówkowy
 
+// ==========================================
+// === KONFIGURACJA ŹRÓDŁA OBRAZU (NOWE) ===
+// ==========================================
+// true  = Tryb symulacji: pobiera gotowe pliki z listy testFiles (SD)
+// false = Tryb Live: robi zdjęcia kamerą
+const bool USE_SD_TEST_IMAGES = true; 
+
+// Lista plików do testów (używana tylko gdy USE_SD_TEST_IMAGES = true)
+const char* testFiles[] = {
+    "/0001_qvga_gray_q75.jpeg",
+    "/0020_qvga_gray_q75.jpeg",
+    "/0026_qvga_gray_q75.jpeg",
+    "/0045_qvga_gray_q75.jpeg",
+    "/0077_qvga_gray_q75.jpeg",
+    "/0091_qvga_gray_q75.jpeg",
+    "/0144_qvga_gray_q75.jpeg",
+    "/0230_qvga_gray_q75.jpeg",
+    "/0240_qvga_gray_q75.jpeg",
+    "/0497_qvga_gray_q75.jpeg",
+    "/0506_qvga_gray_q75.jpeg",
+    "/0515_qvga_gray_q75.jpeg",
+    "/0725_qvga_gray_q75.jpeg",
+    "/0969_qvga_gray_q75.jpeg",
+    "/1122_qvga_gray_q75.jpeg",
+    "/1259_qvga_gray_q75.jpeg"
+};
+const int testFilesCount = sizeof(testFiles) / sizeof(testFiles[0]);
+int currentTestFileIndex = 0; // Indeks aktualnie przetwarzanego pliku testowego
+
+// ==========================================
+// === KONFIGURACJA TRYBU PRACY ===
+// ==========================================
+// true  = ZAWSZE wysyłaj pełne zdjęcia (cyklicznie). Wyłącza algorytmy różnicowe.
+// false = Pierwsze zdjęcie pełne, kolejne wysyłane jako różnice (Sparse JPEG).
+const bool ONLY_FULL_IMAGES_MODE = true; 
+// ==========================================
+
 constexpr uint8_t SD_CS = 21;
 constexpr uint8_t SD_SCK = 7;
 constexpr uint8_t SD_MISO = 8;
@@ -83,7 +120,7 @@ static char current_filename_buffer[50]; // Bufor na nazwę pliku
 
 // === ZMIENNE DO CYKLICZNEGO DZIAŁANIA ===
 unsigned long lastCaptureTime = 0;
-const unsigned long CAPTURE_INTERVAL = 10000; // 10 sekund (w ms)
+const unsigned long CAPTURE_INTERVAL = 50000; // 15 sekund (w ms)
 // ========================================
 
 
@@ -153,7 +190,11 @@ void initCamera() {
     .jpeg_quality = 12,           // Dobra jakość JPEG z kamery
     .fb_count = 1
   };
-  if (esp_camera_init(&cfg) != ESP_OK) { Serial.println("[ERROR] Camera init failed"); while (true) delay(1000); } 
+  // Jeśli używamy trybu SD, błąd kamery nie powinien blokować programu, ale ostrzegamy
+  if (esp_camera_init(&cfg) != ESP_OK) { 
+      Serial.println("[WARNING] Camera init failed (ok if in SD Test Mode)"); 
+      if (!USE_SD_TEST_IMAGES) { while (true) delay(1000); }
+  } 
   else { 
     Serial.println("[OK] Camera initialized successfully");
     
@@ -238,7 +279,10 @@ uint8_t* decodeJpegToGrayscale(const char* path, uint16_t* out_width, uint16_t* 
 
 void sendFullImage(const char* path) {
   File f = SD.open(path, FILE_READ);
-  if (!f) return;
+  if (!f) {
+      Serial.printf("[ERROR] Cannot open file: %s\n", path);
+      return;
+  }
   uint32_t fileSize = f.size();
   f.close();
 
@@ -273,16 +317,25 @@ void sendFullImage(const char* path) {
   while (ackValue != 0xAA && millis() - startWait < 8000) delay(10);
 
   if (ackValue == 0xAA) {
-    Serial.println("[sendFullImage] Sukces. Ładowanie prev_gray...");
-    if (prev_gray) { heap_caps_free(prev_gray); prev_gray = nullptr; }
+    Serial.println("[sendFullImage] Sukces.");
     
-    uint16_t w, h;
-    prev_gray = decodeJpegToGrayscale(path, &w, &h); // Dekoduj to co wysłaliśmy jako bazę
-    
-    if (prev_gray) {
-      first_press = false; // Przełącz na tryb Diff
-      Serial.println("[DEBUG] Tryb Diff aktywny.");
+    // === OPTYMALIZACJA ===
+    if (!ONLY_FULL_IMAGES_MODE) {
+        Serial.println("[DEBUG] Ładowanie prev_gray dla przyszłych różnic...");
+        if (prev_gray) { heap_caps_free(prev_gray); prev_gray = nullptr; }
+        
+        uint16_t w, h;
+        prev_gray = decodeJpegToGrayscale(path, &w, &h); // Dekoduj to co wysłaliśmy jako bazę
+        
+        if (prev_gray) {
+          first_press = false; // Przełącz na tryb Diff
+          Serial.println("[DEBUG] Tryb Diff aktywny.");
+        }
+    } else {
+        Serial.println("[DEBUG] Tryb FULL - pomijam ładowanie prev_gray.");
     }
+    // =====================
+    
   } else {
     resetBLEClient();
   }
@@ -393,7 +446,7 @@ void computeAndSendSparseJpegDiff(const char* current_frame_path) {
       }
     }
   }
-  // --- DODANO LOGOWANIE ZMIENIONYCH BLOKÓW ---
+  // --- LOGOWANIE ZMIENIONYCH BLOKÓW ---
   Serial.printf("[computeDiff] Zmiana: %d bloków (%lu ms)\n", changed_count, millis() - diff_start_time);
   // ---------------------------------------------
 
@@ -476,36 +529,65 @@ bool savePhotoToSD(camera_fb_t* fb, const char* filename) {
 }
 
 /**
- * @brief Główna funkcja wyzwalana przyciskiem.
- * Pobiera zdjęcie -> Zapisuje na SD -> Wysyła (Full lub Diff)
+ * @brief Główna funkcja wyzwalana automatycznie.
+ * W trybie SD: Pobiera ścieżkę z tablicy -> Wysyła.
+ * W trybie Kamery: Robi zdjęcie -> Zapisuje -> Wysyła.
  */
 void captureAndProcessImage() {
-  Serial.println("\n[ACTION] Auto Capture - start sekwencji.");
+  const char* pathToSend = nullptr;
 
-  // 1. Zrób zdjęcie
-  camera_fb_t * fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("[CAMERA ERROR] Błąd pobierania klatki!");
-    return;
+  if (USE_SD_TEST_IMAGES) {
+    // --- TRYB TESTOWY (Z PLIKÓW) ---
+    pathToSend = testFiles[currentTestFileIndex];
+    Serial.printf("\n[TEST MODE] Wybieram plik: %s\n", pathToSend);
+
+    // Sprawdź czy plik istnieje
+    if (!SD.exists(pathToSend)) {
+       Serial.printf("[ERROR] Plik %s nie istnieje na karcie SD!\n", pathToSend);
+       // Mimo błędu inkrementujemy, żeby spróbować następny
+       currentTestFileIndex = (currentTestFileIndex + 1) % testFilesCount;
+       return;
+    }
+
+    // Przygotuj indeks na następną pętlę
+    currentTestFileIndex++;
+    if (currentTestFileIndex >= testFilesCount) {
+        currentTestFileIndex = 0; // Pętla od początku
+    }
+
+  } else {
+    // --- TRYB KAMERY (NA ŻYWO) ---
+    Serial.println("\n[ACTION] Auto Capture - start sekwencji.");
+
+    // 1. Zrób zdjęcie
+    camera_fb_t * fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("[CAMERA ERROR] Błąd pobierania klatki!");
+      return;
+    }
+
+    // 2. Wygeneruj nową nazwę pliku
+    capture_counter++;
+    sprintf(current_filename_buffer, "/cap_%04d.jpg", capture_counter);
+
+    // 3. Zapisz na SD
+    bool saved = savePhotoToSD(fb, current_filename_buffer);
+
+    // 4. Zwolnij pamięć kamery (Kluczowe!)
+    esp_camera_fb_return(fb);
+
+    if (!saved) return;
+    pathToSend = current_filename_buffer;
   }
 
-  // 2. Wygeneruj nową nazwę pliku
-  capture_counter++;
-  sprintf(current_filename_buffer, "/cap_%04d.jpg", capture_counter);
-
-  // 3. Zapisz na SD
-  bool saved = savePhotoToSD(fb, current_filename_buffer);
-
-  // 4. Zwolnij pamięć kamery (Kluczowe dla stabilności!)
-  esp_camera_fb_return(fb);
-
-  if (!saved) return;
-
-  // 5. Wyślij
-  if (first_press) {
-    sendFullImage(current_filename_buffer);
+  // --- WSPÓLNA LOGIKA WYSYŁANIA (dla pliku z SD lub z Kamery) ---
+  
+  // JEŚLI (tryb tylko pełne zdjęcia LUB to pierwszy przebieg) -> Wyślij FULL
+  if (ONLY_FULL_IMAGES_MODE || first_press) {
+    sendFullImage(pathToSend);
   } else {
-    computeAndSendSparseJpegDiff(current_filename_buffer);
+    // W przeciwnym razie wyślij DIFF
+    computeAndSendSparseJpegDiff(pathToSend);
   }
 }
 
@@ -515,7 +597,7 @@ void captureAndProcessImage() {
 
 void setup() {
   Serial.begin(115200); delay(1000);
-  Serial.println("Starting Node A (Camera Capture Mode)...");
+  Serial.println("Starting Node A (Camera Capture / Test Mode)...");
 
   pinMode(buttonPin, INPUT_PULLUP);
 
@@ -544,27 +626,10 @@ void loop() {
     return;
   }
 
-  // === CYKLICZNE WYKONYWANIE ZDJĘĆ ===
+  // === CYKLICZNE WYKONYWANIE ZDJĘĆ / TESTÓW ===
   unsigned long now = millis();
   if (now - lastCaptureTime > CAPTURE_INTERVAL) {
     captureAndProcessImage();
     lastCaptureTime = now;
   }
-  // ===================================
-
-  // --- Zakomentowana obsługa przycisku ---
-  /*
-  int reading = digitalRead(buttonPin);
-  if (reading != lastButtonState) lastDebounceTime = millis();
-
-  if ((millis() - lastDebounceTime) > debounceDelay) {
-    if (reading != buttonState) {
-      buttonState = reading;
-      if (buttonState == LOW) { // Przycisk wciśnięty
-        captureAndProcessImage();
-      }
-    }
-  }
-  lastButtonState = reading;
-  */
 }

@@ -74,6 +74,10 @@ unsigned long stateStartTime = 0;
 int retryCount = 0;
 const int MAX_NEGOTIATION_RETRIES = 5;
 
+// --- NOWA ZMIENNA DO SUMOWANIA CAŁOŚCI ---
+uint32_t grandTotalToA = 0; 
+// -----------------------------------------
+
 volatile bool loraPacketReceived = false;
 
 // Prototypy
@@ -188,6 +192,13 @@ void processLoRaStateMachine() {
       
       radio.transmit(reqBuffer, offset);
       
+      uint32_t startToA = radio.getTimeOnAir(offset) / 1000;
+      Serial.printf("[ToA] NEGOTIATION Packet: %lu ms\n", startToA);
+      
+      // --- RESET LICZNIKA SESJI ---
+      grandTotalToA = startToA; 
+      // ----------------------------
+
       // ZAPOBIEGANIE DUCHOM:
       loraPacketReceived = false; 
       
@@ -256,6 +267,8 @@ void processLoRaStateMachine() {
       uint16_t totalPackets = (totalData + dataChunkSize - 1) / dataChunkSize;
       uint8_t packetBuf[LORA_PACKET_SIZE];
       
+      uint32_t burstTotalToA = 0;
+      
       for (uint16_t i = 0; i < totalPackets; i++) {
         fillLoRaHeader(packetBuf, FRAME_TYPE_DATA, i);
         
@@ -263,13 +276,39 @@ void processLoRaStateMachine() {
         size_t len = min((size_t)dataChunkSize, (size_t)(totalData - offset));
         memcpy(packetBuf + sizeof(LoRaHeader), &imageBuffer[offset], len);
         
-        radio.transmit(packetBuf, sizeof(LoRaHeader) + len);
-        if (i % 10 == 0) Serial.print(".");
+        size_t packetLen = sizeof(LoRaHeader) + len;
+        radio.transmit(packetBuf, packetLen);
+
+        // --- OBLICZANIE ToA POJEDYNCZEGO PAKIETU ---
+        uint32_t singlePktToA = radio.getTimeOnAir(packetLen) / 1000;
+        burstTotalToA += singlePktToA;
+        
+        // --- LOGOWANIE POJEDYNCZEJ RAMKI ---
+        Serial.printf("[ToA] Pkt %u/%u (len=%u): %lu ms\n", i+1, totalPackets, packetLen, singlePktToA);
+        // -----------------------------------
       }
-      Serial.println("\n[LORA] Koniec danych. Wysylam END.");
+      Serial.println("\n[LORA] Koniec danych.");
+      
+      // Logowanie sumy Bursta
+      Serial.printf("[ToA] TOTAL BURST DATA: %lu ms\n", burstTotalToA);
+      
+      // Dodaj Burst do całości
+      grandTotalToA += burstTotalToA;
+      
+      Serial.println("[LORA] Wysylam END.");
       
       fillLoRaHeader(packetBuf, FRAME_TYPE_END, 0);
       radio.transmit(packetBuf, sizeof(LoRaHeader));
+      
+      // --- LOGOWANIE ToA END + TOTAL SESJI ---
+      uint32_t endToA = radio.getTimeOnAir(sizeof(LoRaHeader)) / 1000;
+      grandTotalToA += endToA;
+      
+      Serial.printf("[ToA] END Packet: %lu ms\n", endToA);
+      Serial.println("=========================================");
+      Serial.printf("[ToA] === SESSION TOTAL (Start+Data+End): %lu ms ===\n", grandTotalToA);
+      Serial.println("=========================================");
+      // ---------------------------------------
       
       loraState = WAITING_FOR_ACK;
       stateStartTime = millis();

@@ -2,221 +2,218 @@ import serial
 import time
 import os
 import io
-from PIL import Image # <--- Przywrócono import
-import numpy as np    # <--- Przywrócono import
+import json
+from PIL import Image
+import numpy as np
 
-# --- Konfiguracja ---
-SERIAL_PORT = 'COM11' # Zmień na swój port
+# --- KONFIGURACJA ---
+SERIAL_PORT = 'COM11'  # Zmień na właściwy port
 BAUD_RATE = 115200
 START_MARKER = 'START_IMAGE_TRANSFER'
-RESULTS_DIR = "tests_home_cam"
+STATS_MARKER = 'STATS_DATA:'
+
+# Foldery i pliki
+RESULTS_DIR = "tests_full_frame_from_SD"
+STATS_FILE = os.path.join(RESULTS_DIR, "session_stats.json")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Kolor tła użyty w kodzie C++ (Node A)
-SPARSE_BACKGROUND_COLOR = 0 # 0x00 dla czarnego
+# Nazewnictwo
+BASE_FRAME_PREFIX = "base_frame_"
+DIFF_FRAME_PREFIX = "diff_raw_frame"
+RECONSTRUCTED_FRAME_PREFIX = "reconstructed_frame"
 
-# --- Przywrócono zmienne globalne ---
-base_image_pil = None # Przechowuje ostatni pełny obraz (obiekt Pillow)
+# Parametry Sparse JPEG
+SPARSE_BACKGROUND_COLOR = 0  # 0 dla czarnego tła
+
+# Zmienne globalne (stan)
+base_image_pil = None
 last_width = 0
 last_height = 0
-last_block_size = 0
-# --------------------
+current_frame_stats = None
 
 def log(message):
-    """Proste logowanie na konsolę."""
+    """Logowanie z timestampem."""
     timestamp = time.strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-# --- Przywrócono funkcję apply_sparse_jpeg ---
+def save_stats_to_json(frame_key, stats_data):
+    """Zapisuje słownik statystyk do pliku JSON."""
+    data = {}
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            pass 
+    
+    data[frame_key] = stats_data
+    
+    with open(STATS_FILE, 'w') as f:
+        json.dump(data, f, indent=4)
+    log(f"[JSON] Zapisano statystyki dla klucza: {frame_key}")
+
 def apply_sparse_jpeg(base_img_pil, sparse_jpeg_data, background_color=0):
-    """
-    Nakłada zmiany ze Sparse JPEG na obraz bazowy.
-
-    Args:
-        base_img_pil (PIL.Image.Image): Obraz bazowy (w skali szarości).
-        sparse_jpeg_data (bytes): Surowe bajty odebranego Sparse JPEG.
-        background_color (int): Wartość piksela tła użyta w Sparse JPEG.
-
-    Returns:
-        PIL.Image.Image: Zaktualizowany obraz bazowy lub None w przypadku błędu.
-    """
+    """Nakłada sparse JPEG na obraz bazowy."""
     if base_img_pil is None:
-        log("[!] Błąd: Obraz bazowy (base_image_pil) nie istnieje.")
         return None
-
     try:
-        log("[*] Dekodowanie Sparse JPEG...")
         sparse_stream = io.BytesIO(sparse_jpeg_data)
-        # Otwórz i upewnij się, że jest w skali szarości ('L')
         sparse_img_pil = Image.open(sparse_stream).convert('L')
-
+        
         if sparse_img_pil.size != base_img_pil.size:
-            log(f"[!] Błąd: Rozmiar Sparse JPEG ({sparse_img_pil.size}) różni się od bazowego ({base_img_pil.size})!")
+            log(f"[!] Błąd wymiarów: Base {base_img_pil.size} vs Sparse {sparse_img_pil.size}")
             return None
 
-        log("[*] Konwersja obrazów do NumPy dla szybkiego dostępu...")
         base_arr = np.array(base_img_pil, dtype=np.uint8)
         sparse_arr = np.array(sparse_img_pil, dtype=np.uint8)
 
-        log(f"[*] Nakładanie zmian (ignorowanie pikseli o wartości {background_color})...")
-        # Stwórz maskę, gdzie piksele w sparse NIE SĄ tłem
+        # Maska zmienionych pikseli
         changed_pixels_mask = sparse_arr != background_color
-
-        # Użyj maski do skopiowania tylko zmienionych pikseli
         base_arr[changed_pixels_mask] = sparse_arr[changed_pixels_mask]
 
-        log("[*] Konwersja zaktualizowanej tablicy z powrotem do obrazu Pillow...")
-        updated_base_img_pil = Image.fromarray(base_arr, mode='L')
-        log("[+] Obraz bazowy zaktualizowany.")
-        return updated_base_img_pil
-
+        return Image.fromarray(base_arr, mode='L')
     except Exception as e:
-        log(f"[!] Błąd podczas przetwarzania Sparse JPEG: {e}")
+        log(f"[!] Błąd rekonstrukcji: {e}")
         return None
-# --- Koniec funkcji apply_sparse_jpeg ---
 
 def main():
-    global base_image_pil, last_width, last_height, last_block_size # Używamy zmiennych globalnych
+    global base_image_pil, last_width, last_height, current_frame_stats
 
-    log(f"Odbiornik obrazów (z obsługą Sparse JPEG). Czekam na {SERIAL_PORT}...") # Zmieniono log startowy
+    log(f"--- Odbiornik LoRa Image Receiver ---")
+    log(f"Port: {SERIAL_PORT}, Zapis do: {RESULTS_DIR}")
 
     try:
         with serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2) as ser:
-            log("Połączono! Oczekiwanie na dane...")
-            image_counter = 0 # Licznik ogólny
+            image_counter = 0
 
             while True:
                 try:
+                    # Odczyt linii (z ignorowaniem błędów dekodowania dla śmieci)
                     line = ser.readline().decode('utf-8', errors='ignore').strip()
                     if not line: continue
 
-                    # --- Logika odbioru ---
-                    if line == START_MARKER:
-                        log(f"\n[+] Wykryto marker startu!")
-                        image_counter += 1
-
-                        # Odczytaj linię z metadanymi
-                        meta_line = ser.readline().decode('utf-8').strip()
-                        log(f"[Node C Meta]: {meta_line}")
-                        parts = meta_line.split(',')
-
-                        if len(parts) != 4 or not all(p.strip().isdigit() for p in parts):
-                            log(f"[!] Błąd: Oczekiwano 'size,width,height,block_size', otrzymano: '{meta_line}'")
-                            continue
-
-                        expected_image_size = int(parts[0].strip())
-                        image_width = int(parts[1].strip())
-                        image_height = int(parts[2].strip())
-                        block_size = int(parts[3].strip())
-                        log(f"[*] Oczekiwane Metadata: Rozmiar={expected_image_size}, W={image_width}, H={image_height}, Blok={block_size}.")
-
-                        # Odczytaj dane obrazu
-                        log(f"[*] Odbieranie {expected_image_size} bajtów obrazu...")
-                        image_data = ser.read(expected_image_size)
-
-                        if len(image_data) != expected_image_size:
-                            log(f"[!] Błąd: Odebrano {len(image_data)}/{expected_image_size} bajtów. Transfer niekompletny.")
-                            continue
-                        log("[+] Dane obrazu odebrane poprawnie.")
-
-                        image_timestamp = time.strftime("%Y%m%d-%H%M%S")
-                        filename_prefix = "" # Baza do nazw plików
-
-                        # --- Przywrócono logikę przetwarzania obrazu ---
-                        is_first_frame = (base_image_pil is None)
-
-                        if is_first_frame:
-                            # To musi być pierwszy, pełny obraz (frame_1)
-                            log("[*] Przetwarzanie jako obraz bazowy (Full Frame)...")
-                            try:
-                                image_stream = io.BytesIO(image_data)
-                                img_pil = Image.open(image_stream).convert('L')
-
-                                if img_pil.size != (image_width, image_height):
-                                     log(f"[!] Warning: Rozmiar zdekodowany ({img_pil.size}) różni się od nagłówka ({image_width}x{image_height})!")
-                                     # Można dodać 'continue'
-
-                                base_image_pil = img_pil # Zapisz jako bazę
-                                last_width = image_width
-                                last_height = image_height
-                                last_block_size = block_size
-                                filename_prefix = f"base_frame_MAD_uczelnia_16_10_{image_timestamp}"
-                                log("[+] Obraz bazowy zapisany w pamięci.")
-
-                            except Exception as e:
-                                log(f"[!] Błąd dekodowania obrazu bazowego: {e}")
-                                filename_prefix = f"error_base_frame_{image_timestamp}"
-                                base_image_pil = None # Resetuj
-
-                        else:
-                            # To powinien być obraz różnicowy (Sparse JPEG)
-                            log("[*] Przetwarzanie jako obraz różnicowy (Sparse JPEG)...")
-                            filename_prefix = f"diff_frame_{image_timestamp}"
-
-                            # Sprawdź, czy metadane pasują
-                            if image_width != last_width or image_height != last_height:
-                                log("[!] Ostrzeżenie: Wymiary diff różnią się od bazy! Traktuję jako nowy obraz bazowy.")
-                                try:
-                                    image_stream = io.BytesIO(image_data)
-                                    base_image_pil = Image.open(image_stream).convert('L')
-                                    last_width = image_width
-                                    last_height = image_height
-                                    last_block_size = block_size
-                                    filename_prefix = f"new_base_frame_{image_timestamp}"
-                                    log("[+] Nowy obraz bazowy zapisany.")
-                                except Exception as e:
-                                    log(f"[!] Błąd dekodowania nowego obrazu bazowego: {e}")
-                                    filename_prefix = f"error_new_base_{image_timestamp}"
-                                    base_image_pil = None
-                            else:
-                                # Wymiary pasują, nałóż zmiany
-                                updated_image = apply_sparse_jpeg(base_image_pil, image_data, SPARSE_BACKGROUND_COLOR)
-                                if updated_image:
-                                    base_image_pil = updated_image # Aktualizuj bazę
-                                    filename_prefix = f"updated_frame_MAD_uczelnia_16_10_{image_timestamp}"
-                                else:
-                                    log("[!] Nie udało się nałożyć zmian Sparse. Zapisuję tylko surowy plik diff.")
-                                    filename_prefix = f"error_diff_frame_{image_timestamp}"
-                        # --- Koniec logiki przetwarzania ---
-
-                        # --- Zapisywanie plików (przywrócono) ---
-                        # Zapisz SUROWE dane odebrane przez Serial
-                        raw_filename = os.path.join(RESULTS_DIR, f"{filename_prefix}_raw.jpg")
+                    # 1. Parsowanie Statystyk
+                    if line.startswith(STATS_MARKER):
+                        # Format: STATS_DATA:minR,maxR,avgR,minS,maxS,avgS,cnt,ToA,nackCnt,nackHistStr
                         try:
-                            with open(raw_filename, 'wb') as f:
-                                f.write(image_data)
-                            log(f"[*] Surowe dane JPEG zapisane jako: {raw_filename}")
-                        except Exception as e:
-                            log(f"[!] Błąd zapisywania surowych danych: {e}")
+                            clean_line = line.replace(STATS_MARKER, "")
+                            vals = clean_line.split(',')
+                            
+                            if len(vals) >= 10:
+                                # Parsowanie historii retransmisji
+                                hist_str = vals[9]
+                                retrans_hist = []
+                                if hist_str != "0":
+                                    retrans_hist = [int(x) for x in hist_str.split(';') if x.isdigit()]
 
-                        # Jeśli mamy obraz w pamięci (bazowy lub zaktualizowany), zapisz go jako PNG
-                        if base_image_pil:
-                             processed_filename = os.path.join(RESULTS_DIR, f"{filename_prefix}_processed.png")
-                             try:
-                                 base_image_pil.save(processed_filename)
-                                 log(f"[*] Przetworzony obraz (po nałożeniu zmian) zapisany jako: {processed_filename}")
-                             except Exception as e:
-                                 log(f"[!] Błąd zapisywania przetworzonego obrazu: {e}")
-                        # --- Koniec zapisywania ---
+                                current_frame_stats = {
+                                    "rssi_min": float(vals[0]),
+                                    "rssi_max": float(vals[1]),
+                                    "rssi_avg": float(vals[2]),
+                                    "snr_min": float(vals[3]),
+                                    "snr_max": float(vals[4]),
+                                    "snr_avg": float(vals[5]),
+                                    "frames_cnt": int(vals[6]),
+                                    "toa_ms": int(vals[7]),
+                                    "retransmissions": {
+                                        "count": int(vals[8]),
+                                        "history": retrans_hist
+                                    }
+                                }
+                                log(f"[STATS] Odebrano dane telemetryczne. Retransmisje: {retrans_hist}")
+                        except ValueError as e:
+                            log(f"[STATS] Błąd parsowania: {e}")
 
-                        log("\nOczekiwanie na kolejny obraz...")
+                    # 2. Start Transferu Obrazu
+                    elif line == START_MARKER:
+                        image_counter += 1
+                        timestamp = time.strftime("%Y%m%d-%H%M%S")
+                        log(f"\n[+] ODBIÓR OBRAZU #{image_counter}...")
 
-                    elif line: # Loguj inne linie z Node C
+                        # Odczyt metadanych: Size, W, H, Block
+                        meta_line = ser.readline().decode('utf-8').strip()
+                        parts = meta_line.split(',')
+                        if len(parts) != 4:
+                            log(f"[!] Błąd metadanych: {meta_line}")
+                            continue
+                        
+                        exp_size, width, height, blk_size = map(int, [p.strip() for p in parts])
+                        
+                        # Odczyt danych binarnych
+                        img_data = ser.read(exp_size)
+                        if len(img_data) != exp_size:
+                            log(f"[!] Niekompletne dane: {len(img_data)}/{exp_size}")
+                            continue
+                        
+                        # --- Przetwarzanie Obrazu ---
+                        frame_key = f"frame_{image_counter}_{timestamp}"
+                        
+                        # Czy to Base Frame? (Pierwsza klatka lub wymuszona zmiana)
+                        is_base_frame = (base_image_pil is None)
+                        
+                        # Jeśli wymiary się zmieniły, traktuj jako Base Frame
+                        if not is_base_frame and (width != last_width or height != last_height):
+                            log("[!] Zmiana rozdzielczości -> Wymuszenie Base Frame.")
+                            is_base_frame = True
+
+                        if is_base_frame:
+                            # --- OBSŁUGA BASE FRAME ---
+                            try:
+                                base_image_pil = Image.open(io.BytesIO(img_data)).convert('L')
+                                last_width, last_height = width, height
+                                
+                                fname = f"{BASE_FRAME_PREFIX}_{timestamp}.png"
+                                path = os.path.join(RESULTS_DIR, fname)
+                                base_image_pil.save(path)
+                                log(f"[FILE] Zapisano BASE: {fname}")
+                                
+                                if current_frame_stats:
+                                    current_frame_stats["type"] = "BASE_FRAME"
+                                    current_frame_stats["size_bytes"] = exp_size
+                                    
+                            except Exception as e:
+                                log(f"[!] Błąd BASE: {e}")
+                                current_frame_stats = None # Nie zapisuj stats jeśli błąd
+                        
+                        else:
+                            # --- OBSŁUGA DIFF FRAME ---
+                            # 1. Zapis surowego diff
+                            raw_fname = f"{DIFF_FRAME_PREFIX}_{timestamp}.jpg"
+                            with open(os.path.join(RESULTS_DIR, raw_fname), 'wb') as f:
+                                f.write(img_data)
+                            
+                            # 2. Rekonstrukcja
+                            updated_img = apply_sparse_jpeg(base_image_pil, img_data, SPARSE_BACKGROUND_COLOR)
+                            if updated_img:
+                                base_image_pil = updated_img # Aktualizacja bazy
+                                recon_fname = f"{RECONSTRUCTED_FRAME_PREFIX}_{timestamp}.png"
+                                path = os.path.join(RESULTS_DIR, recon_fname)
+                                base_image_pil.save(path)
+                                log(f"[FILE] Zapisano RECONSTRUCTED: {recon_fname}")
+                                
+                                if current_frame_stats:
+                                    current_frame_stats["type"] = "DIFF_RECONSTRUCTED"
+                                    current_frame_stats["diff_size_bytes"] = exp_size
+                            else:
+                                log("[!] Błąd rekonstrukcji obrazu.")
+                        
+                        # --- Zapis Statystyk ---
+                        if current_frame_stats:
+                            save_stats_to_json(frame_key, current_frame_stats)
+                            current_frame_stats = None # Reset
+                            
+                        log("--- Gotowy ---")
+
+                    # Logowanie innych komunikatów z Node C
+                    elif line:
                         log(f"[Node C]: {line}")
 
-                except UnicodeDecodeError:
-                     pass
-                except serial.SerialTimeoutException:
-                     log("[Timeout] Brak danych w oknie czasowym.")
-                     pass
-                except Exception as e:
-                    log(f"[!] Błąd w pętli głównej: {e}")
-                    time.sleep(1)
+                except Exception as loop_e:
+                    log(f"Błąd pętli: {loop_e}")
+                    time.sleep(0.5)
 
     except serial.SerialException as e:
-        log(f"BŁĄD KRYTYCZNY: Nie można otworzyć portu {SERIAL_PORT}. {e}")
-    except KeyboardInterrupt:
-        log("\nProgram zatrzymany przez użytkownika.")
+        log(f"KRYTYCZNY BŁĄD PORTU: {e}")
 
 if __name__ == '__main__':
     main()
