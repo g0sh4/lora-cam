@@ -2,9 +2,16 @@
 #include <SPI.h>
 #include <RadioLib.h>
 #include <vector>
-#include "frame_structure.h" // Upewnij się, że masz ten plik w folderze projektu
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "frame_structure.h" // Twój plik z definicją LoRaHeader
 
-// --- KONFIGURACJA PINÓW (SX1262) ---
+// --- KONFIGURACJA SIECI WIFI ---
+const char* WIFI_SSID = "NJU_Swiatlowod_EC20";
+const char* WIFI_PASS = "J3JQ446ZNTJR";
+const char* SERVER_URL = "http://192.168.1.17:5000/upload"; 
+
+// --- KONFIGURACJA PINÓW (SX1262 - XIAO ESP32S3) ---
 #define LORA_SCK_PIN 7
 #define LORA_MISO_PIN 8
 #define LORA_MOSI_PIN 9
@@ -13,7 +20,7 @@
 #define LORA_DIO1_PIN 39
 #define LORA_RST_PIN 42
 
-// --- KONFIGURACJA LORA (START NA SF12) ---
+// --- KONFIGURACJA LORA ---
 #define CONTROL_SF 12
 #define LORA_FREQUENCY 868.0
 #define LORA_BANDWIDTH 125.0
@@ -31,6 +38,7 @@ NodeCState cState = C_IDLE;
 // --- ZMIENNE SESJI ---
 uint8_t currentTransactionId = 255;
 uint8_t currentSF = CONTROL_SF; 
+uint8_t currentTxType = 0; // <--- NOWA ZMIENNA: Przechowuje typ (1=FULL, 2=DIFF)
 
 uint32_t expectedImageSize = 0;
 uint16_t expectedPacketCount = 0;
@@ -42,16 +50,10 @@ std::vector<bool> packetsReceived;
 
 // --- STRUKTURA DO STATYSTYK ---
 struct LinkStats {
-    float rssi_min;
-    float rssi_max;
-    float rssi_sum;
-    float snr_min;
-    float snr_max;
-    float snr_sum;
+    float rssi_min; float rssi_max; float rssi_sum;
+    float snr_min; float snr_max; float snr_sum;
     uint32_t total_toa;
     uint16_t frames_count;
-    
-    // Historia retransmisji (ile pakietów brakowało w każdej próbie NACK)
     std::vector<uint16_t> retransmissions; 
     
     void reset() {
@@ -68,14 +70,23 @@ void setLoRaModeTx(uint8_t sf);
 void handleReceivedPacket(int packetSize);
 void sendGrant(uint8_t targetSF);
 void sendNackOrAck();
-void sendImageToComputer();
+void sendDataOverWiFi();
 void resetReceiverState();
 void updateStats(float rssi, float snr, uint32_t toa);
 
 void setup() {
-    Serial.begin(115200); delay(2000);
-    Serial.println("Starting Node C (Receiver + FULL STATS)...");
+    Serial.begin(115200); 
     
+    // 1. Połączenie z Wi-Fi
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    Serial.print("[WIFI] Laczenie");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.printf("\n[WIFI] Polaczono! IP: %s\n", WiFi.localIP().toString().c_str());
+
+    // 2. Inicjalizacja LoRa
     pinMode(LED_BUILTIN, OUTPUT);
     pinMode(LORA_RST_PIN, OUTPUT);
     digitalWrite(LORA_RST_PIN, LOW); delay(10);
@@ -97,7 +108,7 @@ void setup() {
     
     stats.reset();
 
-    Serial.printf("[LORA] Gotowy. Nasłuch na SF%d (Control)\n", CONTROL_SF);
+    Serial.printf("[LORA] Gotowy. Nasluch na SF%d (Control)\n", CONTROL_SF);
     radio.startReceive();
 }
 
@@ -147,28 +158,34 @@ void handleReceivedPacket(int packetSize) {
     Serial.printf("[%lu][RX] ID:%u T:%u S:%u SF:%d R:%.1f S:%.2f ToA:%lu\n", 
                   millis(), header->transaction_id, header->frame_type, header->sequence_num, currentSF, rssi, snr, rxToA);
 
-    // Zbieranie statystyk (tylko dla aktywnej transakcji lub nowego STARTu)
+    // Zbieranie statystyk
     if ((cState == C_RECEIVING && header->transaction_id == currentTransactionId) || 
         (cState == C_IDLE && header->frame_type == FRAME_TYPE_START)) {
         
-        // Reset statystyk przy nowym START
         if (cState == C_IDLE && header->frame_type == FRAME_TYPE_START) stats.reset();
-        
         updateStats(rssi, snr, rxToA);
     }
 
     // --- MASZYNA STANÓW ---
     if (cState == C_IDLE) {
         if (header->frame_type == FRAME_TYPE_START) {
-            // Parsowanie Payloadu START: Width(2), Height(2), Block(1), PktCnt(2), ImgSize(4)
-            size_t offset = sizeof(LoRaHeader) + 1; // +1 pomija txType
+            // --- POPRAWKA: Prawidłowe czytanie Payloadu START ---
+            size_t offset = sizeof(LoRaHeader); // Zaczynamy zaraz po nagłówku
+            
+            // 1. Odczyt Typu Transmisji (1 bajt)
+            currentTxType = packetBuffer[offset]; 
+            offset++; 
+
+            // 2. Reszta parametrów
             imageWidth = *(uint16_t*)(packetBuffer + offset); offset += 2;
             imageHeight = *(uint16_t*)(packetBuffer + offset); offset += 2; 
-            blockSize = *(uint8_t*)(packetBuffer + offset); offset++; // To pole mogło być pominięte we wcześniejszej wersji, upewnij się
+            blockSize = *(uint8_t*)(packetBuffer + offset); offset++; 
             expectedPacketCount = *(uint16_t*)(packetBuffer + offset); offset += 2;
             expectedImageSize = *(uint32_t*)(packetBuffer + offset);
 
-            Serial.printf("[AITP] START. Size:%u Pkts:%u. Deciding SF...\n", expectedImageSize, expectedPacketCount);
+            Serial.printf("[START] Type: %s (0x%02X) | Size:%u Pkts:%u\n", 
+                (currentTxType == TX_TYPE_FULL_IMAGE ? "FULL" : "DIFF"), 
+                currentTxType, expectedImageSize, expectedPacketCount);
 
             // Adaptacja SF
             uint8_t selectedSF = 12; 
@@ -224,7 +241,6 @@ void sendGrant(uint8_t targetSF) {
     buf[sizeof(LoRaHeader)] = targetSF; 
     
     radio.transmit(buf, sizeof(buf));
-    // Nie przełączamy na Rx tutaj, zrobimy to po powrocie do funkcji wywołującej
 }
 
 void sendNackOrAck() {
@@ -232,7 +248,6 @@ void sendNackOrAck() {
     for (uint16_t i = 0; i < expectedPacketCount; i++) if (!packetsReceived[i]) missing.push_back(i);
     delay(20);
 
-    // Rejestracja retransmisji
     if (!missing.empty()) {
         stats.retransmissions.push_back((uint16_t)missing.size());
     }
@@ -240,7 +255,7 @@ void sendNackOrAck() {
     setLoRaModeTx(currentSF); 
     
     if (missing.empty()) {
-        // ACK
+        // --- ACK & SUCCESS ---
         uint8_t ack[sizeof(LoRaHeader)];
         LoRaHeader* h = (LoRaHeader*)ack;
         h->transaction_id = currentTransactionId & 0x07;
@@ -248,18 +263,18 @@ void sendNackOrAck() {
         h->sequence_num = 0;
         
         radio.transmit(ack, sizeof(ack));
-        Serial.println("[TX] ACK FULL. Transfer ukonczony.");
+        Serial.println("[TX] ACK FULL. Start uploadu po WiFi...");
         
-        sendImageToComputer();
+        sendDataOverWiFi();
+        
         resetReceiverState();
     } else {
-        // NACK
-        Serial.printf("[TX] NACK. Brak %u pkt. Próba #%u\n", missing.size(), stats.retransmissions.size());
+        // --- NACK ---
+        Serial.printf("[TX] NACK. Brak %u pkt.\n", missing.size());
         
         size_t count = min((size_t)missing.size(), (size_t)((255 - sizeof(LoRaHeader)-3)/2));
         size_t pSize = sizeof(LoRaHeader) + 3 + (count * 2);
         
-        // Dynamiczna alokacja tablicy na stosie (VLA) lub vector
         std::vector<uint8_t> nackBuf(pSize);
         LoRaHeader* h = (LoRaHeader*)nackBuf.data();
         h->transaction_id = currentTransactionId & 0x07;
@@ -276,37 +291,91 @@ void sendNackOrAck() {
     }
 }
 
-void sendImageToComputer() {
-    if (imageBuffer.empty()) return;
-    
-    // Obliczenia średnich
+// --- FUNKCJA WYSYŁAJĄCA DANE DO PYTHON FLASK ---
+void sendDataOverWiFi() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WIFI] Utracono polaczenie! Próba reconnectu...");
+        WiFi.reconnect();
+        unsigned long start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) delay(100);
+        if (WiFi.status() != WL_CONNECTED) return;
+    }
+
+    HTTPClient http;
+    WiFiClient client; 
+
+    // Konstrukcja JSON ze statystykami
     float avgRssi = (stats.frames_count > 0) ? (stats.rssi_sum / stats.frames_count) : 0.0;
     float avgSnr = (stats.frames_count > 0) ? (stats.snr_sum / stats.frames_count) : 0.0;
     
-    // Budowanie historii retransmisji (CSV z średnikami)
-    String nackHistoryStr = "";
-    if (stats.retransmissions.empty()) {
-        nackHistoryStr = "0";
-    } else {
-        for (size_t i = 0; i < stats.retransmissions.size(); i++) {
-            nackHistoryStr += String(stats.retransmissions[i]);
-            if (i < stats.retransmissions.size() - 1) nackHistoryStr += ";";
-        }
+    String retransJson = "[";
+    for(size_t i=0; i<stats.retransmissions.size(); i++) {
+        retransJson += String(stats.retransmissions[i]);
+        if(i < stats.retransmissions.size()-1) retransJson += ",";
     }
+    retransJson += "]";
 
-    // Format: STATS_DATA:minR,maxR,avgR,minS,maxS,avgS,cnt,ToA,nackCnt,nackHist
-    Serial.printf("STATS_DATA:%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%lu,%u,%s\n",
-        stats.rssi_min, stats.rssi_max, avgRssi,
-        stats.snr_min, stats.snr_max, avgSnr,
-        stats.frames_count, stats.total_toa,
-        stats.retransmissions.size(),
-        nackHistoryStr.c_str()
-    );
+    String jsonStats = "{";
+    // --- NOWOŚĆ: Dodajemy img_type do JSON ---
+    jsonStats += "\"img_type\":" + String(currentTxType) + ","; 
+    jsonStats += "\"rssi_min\":" + String(stats.rssi_min) + ",";
+    jsonStats += "\"rssi_max\":" + String(stats.rssi_max) + ",";
+    jsonStats += "\"rssi_avg\":" + String(avgRssi) + ",";
+    jsonStats += "\"snr_min\":" + String(stats.snr_min) + ",";
+    jsonStats += "\"snr_max\":" + String(stats.snr_max) + ",";
+    jsonStats += "\"snr_avg\":" + String(avgSnr) + ",";
+    jsonStats += "\"toa_ms\":" + String(stats.total_toa) + ",";
+    jsonStats += "\"frames_cnt\":" + String(stats.frames_count) + ",";
+    jsonStats += "\"retrans_cnt\":" + String(stats.retransmissions.size()) + ",";
+    jsonStats += "\"retrans_hist\":" + retransJson + ","; 
+    jsonStats += "\"img_width\":" + String(imageWidth) + ",";
+    jsonStats += "\"img_height\":" + String(imageHeight) + ",";
+    jsonStats += "\"block_size\":" + String(blockSize);
+    jsonStats += "}";
 
-    Serial.print("START_IMAGE_TRANSFER\n");
-    Serial.printf("%u,%u,%u,%u\n", expectedImageSize, imageWidth, imageHeight, blockSize);
-    Serial.write(imageBuffer.data(), imageBuffer.size());
-    Serial.print("\n");
+    String boundary = "---ESP32Boundary7MA4YWxkTrZu0gW";
+    String headStats = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"stats\"\r\n\r\n" + jsonStats + "\r\n";
+    String headFile = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"image\"; filename=\"cam.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n";
+    String tail = "\r\n--" + boundary + "--\r\n";
+
+    size_t totalLen = headStats.length() + headFile.length() + imageBuffer.size() + tail.length();
+
+    // Parsowanie IP z SERVER_URL (żeby nie wpisywać ręcznie)
+    String url = String(SERVER_URL);
+    int ipStart = url.indexOf("//") + 2;
+    int ipEnd = url.indexOf(":", ipStart);
+    String ipStr = url.substring(ipStart, ipEnd);
+    int port = 5000; 
+
+    // Manualne wysyłanie po TCP (dla pamięci i streamowania)
+    if (client.connect(ipStr.c_str(), port)) { 
+        client.println("POST /upload HTTP/1.1");
+        client.print("Host: "); client.print(ipStr); client.print(":"); client.println(port);
+        client.println("Content-Type: multipart/form-data; boundary=" + boundary);
+        client.print("Content-Length: "); client.println(totalLen);
+        client.println("Connection: close");
+        client.println();
+        
+        client.print(headStats);
+        client.print(headFile);
+        client.write(imageBuffer.data(), imageBuffer.size()); // Wysyłamy binarny obraz
+        client.print(tail);
+        
+        // Odbiór odpowiedzi
+        unsigned long timeout = millis();
+        while(client.connected() && !client.available()) {
+            if(millis() - timeout > 5000) break;
+            delay(10);
+        }
+        while(client.available()) { 
+            String line = client.readStringUntil('\n'); 
+        }
+        
+        client.stop();
+        Serial.println("[HTTP] Upload zakonczony sukcesem.");
+    } else {
+        Serial.println("[HTTP] Blad polaczenia TCP");
+    }
 }
 
 void setLoRaModeRx(uint8_t sf) { radio.setSpreadingFactor(sf); radio.startReceive(); }

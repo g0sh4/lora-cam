@@ -13,7 +13,7 @@ START_MARKER = 'START_IMAGE_TRANSFER'
 STATS_MARKER = 'STATS_DATA:'
 
 # Foldery i pliki
-RESULTS_DIR = "tests_full_frame_from_SD"
+RESULTS_DIR = "badania_monitoring_january"
 STATS_FILE = os.path.join(RESULTS_DIR, "session_stats.json")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 

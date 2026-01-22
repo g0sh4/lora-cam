@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../NODE_B"
+		},
+		{
+			"path": "../NODE_C"
+		},
+		{
+			"name": "NODE_C",
+			"path": "../../NODE_C"
+		}
+	]
+}

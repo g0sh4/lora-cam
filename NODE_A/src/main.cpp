@@ -9,6 +9,8 @@
 #include <BLEClient.h>
 #include <JPEGENC.h>
 #include <JPEGDEC.h>
+#include <vector> 
+#include <algorithm>
 #include "ble_frame_structure.h" // Twój plik nagłówkowy
 
 // ==========================================
@@ -20,22 +22,354 @@ const bool USE_SD_TEST_IMAGES = true;
 
 // Lista plików do testów (używana tylko gdy USE_SD_TEST_IMAGES = true)
 const char* testFiles[] = {
-    "/0001_qvga_gray_q75.jpeg",
-    "/0020_qvga_gray_q75.jpeg",
-    "/0026_qvga_gray_q75.jpeg",
-    "/0045_qvga_gray_q75.jpeg",
-    "/0077_qvga_gray_q75.jpeg",
-    "/0091_qvga_gray_q75.jpeg",
-    "/0144_qvga_gray_q75.jpeg",
-    "/0230_qvga_gray_q75.jpeg",
-    "/0240_qvga_gray_q75.jpeg",
-    "/0497_qvga_gray_q75.jpeg",
-    "/0506_qvga_gray_q75.jpeg",
-    "/0515_qvga_gray_q75.jpeg",
-    "/0725_qvga_gray_q75.jpeg",
-    "/0969_qvga_gray_q75.jpeg",
-    "/1122_qvga_gray_q75.jpeg",
-    "/1259_qvga_gray_q75.jpeg"
+"/img_20260116_102132.jpg",
+"/img_20260116_102204.jpg",
+"/img_20260116_102305.jpg",
+"/img_20260116_102405.jpg",
+"/img_20260116_102505.jpg",
+"/img_20260116_102605.jpg",
+"/img_20260116_102706.jpg",
+"/img_20260116_102806.jpg",
+"/img_20260116_102906.jpg",
+"/img_20260116_103006.jpg",
+"/img_20260116_103107.jpg",
+"/img_20260116_103207.jpg",
+"/img_20260116_103308.jpg",
+"/img_20260116_103408.jpg",
+"/img_20260116_103508.jpg",
+"/img_20260116_103608.jpg",
+"/img_20260116_103709.jpg",
+"/img_20260116_103809.jpg",
+"/img_20260116_103909.jpg",
+"/img_20260116_104009.jpg",
+"/img_20260116_104110.jpg",
+"/img_20260116_104210.jpg",
+"/img_20260116_104310.jpg",
+"/img_20260116_104410.jpg",
+"/img_20260116_104511.jpg",
+"/img_20260116_104611.jpg",
+"/img_20260116_104711.jpg",
+"/img_20260116_104811.jpg",
+"/img_20260116_104912.jpg",
+"/img_20260116_105012.jpg",
+"/img_20260116_105112.jpg",
+"/img_20260116_105213.jpg",
+"/img_20260116_105313.jpg",
+"/img_20260116_105413.jpg",
+"/img_20260116_105513.jpg",
+"/img_20260116_105614.jpg",
+"/img_20260116_105714.jpg",
+"/img_20260116_105814.jpg",
+"/img_20260116_105914.jpg",
+"/img_20260116_110015.jpg",
+"/img_20260116_110218.jpg",
+"/img_20260116_110318.jpg",
+"/img_20260116_110418.jpg",
+"/img_20260116_110519.jpg",
+"/img_20260116_110619.jpg",
+"/img_20260116_110719.jpg",
+"/img_20260116_110819.jpg",
+"/img_20260116_110919.jpg",
+"/img_20260116_111020.jpg",
+"/img_20260116_111120.jpg",
+"/img_20260116_111220.jpg",
+"/img_20260116_111320.jpg",
+"/img_20260116_111421.jpg",
+"/img_20260116_111521.jpg",
+"/img_20260116_111621.jpg",
+"/img_20260116_111721.jpg",
+"/img_20260116_111821.jpg",
+"/img_20260116_111922.jpg",
+"/img_20260116_112022.jpg",
+"/img_20260116_112122.jpg",
+"/img_20260116_112222.jpg",
+"/img_20260116_112322.jpg",
+"/img_20260116_112423.jpg",
+"/img_20260116_112523.jpg",
+"/img_20260116_112623.jpg",
+"/img_20260116_112723.jpg",
+"/img_20260116_112824.jpg",
+"/img_20260116_112924.jpg",
+"/img_20260116_113024.jpg",
+"/img_20260116_113124.jpg",
+"/img_20260116_113224.jpg",
+"/img_20260116_113325.jpg",
+"/img_20260116_113425.jpg",
+"/img_20260116_113525.jpg",
+"/img_20260116_113625.jpg",
+"/img_20260116_113726.jpg",
+"/img_20260116_113826.jpg",
+"/img_20260116_113926.jpg",
+"/img_20260116_114026.jpg",
+"/img_20260116_114126.jpg",
+"/img_20260116_114227.jpg",
+"/img_20260116_114327.jpg",
+"/img_20260116_114427.jpg",
+"/img_20260116_114527.jpg",
+"/img_20260116_114627.jpg",
+"/img_20260116_114728.jpg",
+"/img_20260116_114828.jpg",
+"/img_20260116_114928.jpg",
+"/img_20260116_115028.jpg",
+"/img_20260116_115128.jpg",
+"/img_20260116_115229.jpg",
+"/img_20260116_115329.jpg",
+"/img_20260116_115429.jpg",
+"/img_20260116_115529.jpg",
+"/img_20260116_115630.jpg",
+"/img_20260116_115730.jpg",
+"/img_20260116_115830.jpg",
+"/img_20260116_115930.jpg",
+"/img_20260116_120030.jpg",
+"/img_20260116_120131.jpg",
+"/img_20260116_120231.jpg",
+"/img_20260116_120331.jpg",
+"/img_20260116_120431.jpg",
+"/img_20260116_120531.jpg",
+"/img_20260116_120632.jpg",
+"/img_20260116_120732.jpg",
+"/img_20260116_120832.jpg",
+"/img_20260116_120932.jpg",
+"/img_20260116_121032.jpg",
+"/img_20260116_121133.jpg",
+"/img_20260116_121233.jpg",
+"/img_20260116_121333.jpg",
+"/img_20260116_121433.jpg",
+"/img_20260116_121534.jpg",
+"/img_20260116_121634.jpg",
+"/img_20260116_121734.jpg",
+"/img_20260116_121835.jpg",
+"/img_20260116_121935.jpg",
+"/img_20260116_122035.jpg",
+"/img_20260116_122135.jpg",
+"/img_20260116_122236.jpg",
+"/img_20260116_122336.jpg",
+"/img_20260116_122436.jpg",
+"/img_20260116_122536.jpg",
+"/img_20260116_122637.jpg",
+"/img_20260116_122737.jpg",
+"/img_20260116_122837.jpg",
+"/img_20260116_122937.jpg",
+"/img_20260116_123037.jpg",
+"/img_20260116_123138.jpg",
+"/img_20260116_123238.jpg",
+"/img_20260116_123338.jpg",
+"/img_20260116_123438.jpg",
+"/img_20260116_123539.jpg",
+"/img_20260116_123639.jpg",
+"/img_20260116_123739.jpg",
+"/img_20260116_123839.jpg",
+"/img_20260116_123940.jpg",
+"/img_20260116_124040.jpg",
+"/img_20260116_124140.jpg",
+"/img_20260116_124241.jpg",
+"/img_20260116_124341.jpg",
+"/img_20260116_124441.jpg",
+"/img_20260116_124542.jpg",
+"/img_20260116_124642.jpg",
+"/img_20260116_124742.jpg",
+"/img_20260116_124842.jpg",
+"/img_20260116_124942.jpg",
+"/img_20260116_125043.jpg",
+"/img_20260116_125143.jpg",
+"/img_20260116_125243.jpg",
+"/img_20260116_125343.jpg",
+"/img_20260116_125444.jpg",
+"/img_20260116_125544.jpg",
+"/img_20260116_125644.jpg",
+"/img_20260116_125745.jpg",
+"/img_20260116_125845.jpg",
+"/img_20260116_125945.jpg",
+"/img_20260116_130046.jpg",
+"/img_20260116_130146.jpg",
+"/img_20260116_130246.jpg",
+"/img_20260116_130346.jpg",
+"/img_20260116_130447.jpg",
+"/img_20260116_130547.jpg",
+"/img_20260116_130647.jpg",
+"/img_20260116_130747.jpg",
+"/img_20260116_130848.jpg",
+"/img_20260116_130948.jpg",
+"/img_20260116_131048.jpg",
+"/img_20260116_131148.jpg",
+"/img_20260116_131248.jpg",
+"/img_20260116_131349.jpg",
+"/img_20260116_131449.jpg",
+"/img_20260116_131550.jpg",
+"/img_20260116_131650.jpg",
+"/img_20260116_131750.jpg",
+"/img_20260116_131851.jpg",
+"/img_20260116_131951.jpg",
+"/img_20260116_132051.jpg",
+"/img_20260116_132151.jpg",
+"/img_20260116_132252.jpg",
+"/img_20260116_132352.jpg",
+"/img_20260116_132452.jpg",
+"/img_20260116_132552.jpg",
+"/img_20260116_132652.jpg",
+"/img_20260116_132753.jpg",
+"/img_20260116_132853.jpg",
+"/img_20260116_132953.jpg",
+"/img_20260116_133054.jpg",
+"/img_20260116_133154.jpg",
+"/img_20260116_133254.jpg",
+"/img_20260116_133354.jpg",
+"/img_20260116_133455.jpg",
+"/img_20260116_133555.jpg",
+"/img_20260116_133655.jpg",
+"/img_20260116_133755.jpg",
+"/img_20260116_133855.jpg",
+"/img_20260116_133956.jpg",
+"/img_20260116_134056.jpg",
+"/img_20260116_134156.jpg",
+"/img_20260116_134256.jpg",
+"/img_20260116_134357.jpg",
+"/img_20260116_134457.jpg",
+"/img_20260116_134557.jpg",
+"/img_20260116_134658.jpg",
+"/img_20260116_134758.jpg",
+"/img_20260116_134858.jpg",
+"/img_20260116_134958.jpg",
+"/img_20260116_135058.jpg",
+"/img_20260116_135159.jpg",
+"/img_20260116_135259.jpg",
+"/img_20260116_135359.jpg",
+"/img_20260116_135459.jpg",
+"/img_20260116_135600.jpg",
+"/img_20260116_135700.jpg",
+"/img_20260116_135800.jpg",
+"/img_20260116_135900.jpg",
+"/img_20260116_140000.jpg",
+"/img_20260116_140101.jpg",
+"/img_20260116_140201.jpg",
+"/img_20260116_140301.jpg",
+"/img_20260116_140401.jpg",
+"/img_20260116_140502.jpg",
+"/img_20260116_140602.jpg",
+"/img_20260116_140702.jpg",
+"/img_20260116_140802.jpg",
+"/img_20260116_140902.jpg",
+"/img_20260116_141003.jpg",
+"/img_20260116_141103.jpg",
+"/img_20260116_141203.jpg",
+"/img_20260116_141303.jpg",
+"/img_20260116_141403.jpg",
+"/img_20260116_141504.jpg",
+"/img_20260116_141604.jpg",
+"/img_20260116_141704.jpg",
+"/img_20260116_141804.jpg",
+"/img_20260116_141904.jpg",
+"/img_20260116_142005.jpg",
+"/img_20260116_142105.jpg",
+"/img_20260116_142205.jpg",
+"/img_20260116_142305.jpg",
+"/img_20260116_142406.jpg",
+"/img_20260116_142506.jpg",
+"/img_20260116_142606.jpg",
+"/img_20260116_142707.jpg",
+"/img_20260116_142807.jpg",
+"/img_20260116_142907.jpg",
+"/img_20260116_143007.jpg",
+"/img_20260116_143107.jpg",
+"/img_20260116_143208.jpg",
+"/img_20260116_143308.jpg",
+"/img_20260116_143408.jpg",
+"/img_20260116_143508.jpg",
+"/img_20260116_143608.jpg",
+"/img_20260116_143709.jpg",
+"/img_20260116_143809.jpg",
+"/img_20260116_143909.jpg",
+"/img_20260116_144009.jpg",
+"/img_20260116_144110.jpg",
+"/img_20260116_144210.jpg",
+"/img_20260116_144310.jpg",
+"/img_20260116_144410.jpg",
+"/img_20260116_144511.jpg",
+"/img_20260116_144611.jpg",
+"/img_20260116_144711.jpg",
+"/img_20260116_144811.jpg",
+"/img_20260116_144911.jpg",
+"/img_20260116_145012.jpg",
+"/img_20260116_145112.jpg",
+"/img_20260116_145212.jpg",
+"/img_20260116_145313.jpg",
+"/img_20260116_145413.jpg",
+"/img_20260116_145513.jpg",
+"/img_20260116_145614.jpg",
+"/img_20260116_145714.jpg",
+"/img_20260116_145814.jpg",
+"/img_20260116_145915.jpg",
+"/img_20260116_150015.jpg",
+"/img_20260116_150115.jpg",
+"/img_20260116_150215.jpg",
+"/img_20260116_150315.jpg",
+"/img_20260116_150416.jpg",
+"/img_20260116_150516.jpg",
+"/img_20260116_150616.jpg",
+"/img_20260116_150716.jpg",
+"/img_20260116_150817.jpg",
+"/img_20260116_150917.jpg",
+"/img_20260116_151017.jpg",
+"/img_20260116_151117.jpg",
+"/img_20260116_151218.jpg",
+"/img_20260116_151318.jpg",
+"/img_20260116_151418.jpg",
+"/img_20260116_151518.jpg",
+"/img_20260116_151618.jpg",
+"/img_20260116_151719.jpg",
+"/img_20260116_151819.jpg",
+"/img_20260116_151919.jpg",
+"/img_20260116_152019.jpg",
+"/img_20260116_152120.jpg",
+"/img_20260116_152220.jpg",
+"/img_20260116_152320.jpg",
+"/img_20260116_152421.jpg",
+"/img_20260116_152521.jpg",
+"/img_20260116_152621.jpg",
+"/img_20260116_152722.jpg",
+"/img_20260116_152822.jpg",
+"/img_20260116_152922.jpg",
+"/img_20260116_153022.jpg",
+"/img_20260116_153123.jpg",
+"/img_20260116_153223.jpg",
+"/img_20260116_153323.jpg",
+"/img_20260116_153424.jpg",
+"/img_20260116_153524.jpg",
+"/img_20260116_153624.jpg",
+"/img_20260116_153724.jpg",
+"/img_20260116_153825.jpg",
+"/img_20260116_153925.jpg",
+"/img_20260116_154025.jpg",
+"/img_20260116_154125.jpg",
+"/img_20260116_154226.jpg",
+"/img_20260116_154326.jpg",
+"/img_20260116_154426.jpg",
+"/img_20260116_154527.jpg",
+"/img_20260116_154627.jpg",
+"/img_20260116_154727.jpg",
+"/img_20260116_154827.jpg",
+"/img_20260116_154927.jpg",
+"/img_20260116_155028.jpg",
+"/img_20260116_155128.jpg",
+"/img_20260116_155228.jpg",
+"/img_20260116_155328.jpg",
+"/img_20260116_155429.jpg",
+"/img_20260116_155529.jpg",
+"/img_20260116_155629.jpg",
+"/img_20260116_155730.jpg",
+"/img_20260116_155830.jpg",
+"/img_20260116_155930.jpg",
+"/img_20260116_160030.jpg",
+"/img_20260116_160130.jpg",
+"/img_20260116_160231.jpg",
+"/img_20260116_160331.jpg",
+"/img_20260116_160431.jpg",
+"/img_20260116_160532.jpg",
+"/img_20260116_160632.jpg",
+"/img_20260116_160732.jpg",
+"/img_20260116_160832.jpg",
+"/img_20260116_160933.jpg",
+"/img_20260116_161034.jpg"
 };
 const int testFilesCount = sizeof(testFiles) / sizeof(testFiles[0]);
 int currentTestFileIndex = 0; // Indeks aktualnie przetwarzanego pliku testowego
@@ -45,9 +379,11 @@ int currentTestFileIndex = 0; // Indeks aktualnie przetwarzanego pliku testowego
 // ==========================================
 // true  = ZAWSZE wysyłaj pełne zdjęcia (cyklicznie). Wyłącza algorytmy różnicowe.
 // false = Pierwsze zdjęcie pełne, kolejne wysyłane jako różnice (Sparse JPEG).
-const bool ONLY_FULL_IMAGES_MODE = true; 
+const bool ONLY_FULL_IMAGES_MODE = false; 
 // ==========================================
-
+const int GOP_SIZE = 20;
+int gop_frame_counter = 0;
+// ==========================================
 constexpr uint8_t SD_CS = 21;
 constexpr uint8_t SD_SCK = 7;
 constexpr uint8_t SD_MISO = 8;
@@ -104,7 +440,7 @@ float mse_threshold = 180.0;
 float dssim_threshold = 0.05; 
 
 uint8_t block_size = 16; 
-uint8_t jpeg_encode_quality = 80; 
+uint8_t jpeg_encode_quality = 90; 
 uint8_t sparse_background_color = 0x00; 
 
 // Globalne bufory
@@ -245,6 +581,31 @@ bool connectToNodeB() {
   return false;
 }
 
+void updateReferenceFile(const char* sourcePath, const char* destPath) {
+  File source = SD.open(sourcePath, FILE_READ);
+  if (!source) {
+    Serial.printf("[SD ERROR] Nie mozna otworzyc zrodla: %s\n", sourcePath);
+    return;
+  }
+
+
+  File dest = SD.open(destPath, FILE_WRITE);
+  if (!dest) {
+    Serial.printf("[SD ERROR] Nie mozna utworzyc pliku ref: %s\n", destPath);
+    source.close();
+    return;
+  }
+
+  uint8_t buf[512];
+  while (source.available()) {
+    size_t len = source.read(buf, 512);
+    dest.write(buf, len);
+  }
+
+  source.close();
+  dest.close();
+  Serial.println("[SD] Zaktualizowano plik referencyjny (/reference.jpg)");
+}
 uint8_t* decodeJpegToGrayscale(const char* path, uint16_t* out_width, uint16_t* out_height) {
   File jpgFile = SD.open(path, FILE_READ);
   if (!jpgFile) return nullptr;
@@ -536,58 +897,120 @@ bool savePhotoToSD(camera_fb_t* fb, const char* filename) {
 void captureAndProcessImage() {
   const char* pathToSend = nullptr;
 
+  // ------------------------------------------------------
+  // KROK 1: POZYSKANIE OBRAZU BIEŻĄCEGO (Zapis na SD)
+  // ------------------------------------------------------
   if (USE_SD_TEST_IMAGES) {
     // --- TRYB TESTOWY (Z PLIKÓW) ---
     pathToSend = testFiles[currentTestFileIndex];
-    Serial.printf("\n[TEST MODE] Wybieram plik: %s\n", pathToSend);
-
-    // Sprawdź czy plik istnieje
+    
     if (!SD.exists(pathToSend)) {
-       Serial.printf("[ERROR] Plik %s nie istnieje na karcie SD!\n", pathToSend);
-       // Mimo błędu inkrementujemy, żeby spróbować następny
+       Serial.printf("[ERROR] Brak pliku testowego: %s\n", pathToSend);
        currentTestFileIndex = (currentTestFileIndex + 1) % testFilesCount;
        return;
     }
-
-    // Przygotuj indeks na następną pętlę
+    // Inkrementacja licznika plików testowych
     currentTestFileIndex++;
-    if (currentTestFileIndex >= testFilesCount) {
-        currentTestFileIndex = 0; // Pętla od początku
-    }
+    if (currentTestFileIndex >= testFilesCount) currentTestFileIndex = 0;
 
   } else {
-    // --- TRYB KAMERY (NA ŻYWO) ---
-    Serial.println("\n[ACTION] Auto Capture - start sekwencji.");
+    // --- TRYB KAMERY (ZDJĘCIE) ---
+    Serial.println("\n[ACTION] Capture -> SD (Tryb Persistent).");
 
-    // 1. Zrób zdjęcie
     camera_fb_t * fb = esp_camera_fb_get();
     if (!fb) {
       Serial.println("[CAMERA ERROR] Błąd pobierania klatki!");
       return;
     }
 
-    // 2. Wygeneruj nową nazwę pliku
     capture_counter++;
     sprintf(current_filename_buffer, "/cap_%04d.jpg", capture_counter);
 
-    // 3. Zapisz na SD
     bool saved = savePhotoToSD(fb, current_filename_buffer);
-
-    // 4. Zwolnij pamięć kamery (Kluczowe!)
-    esp_camera_fb_return(fb);
+    esp_camera_fb_return(fb); 
 
     if (!saved) return;
     pathToSend = current_filename_buffer;
   }
 
-  // --- WSPÓLNA LOGIKA WYSYŁANIA (dla pliku z SD lub z Kamery) ---
+  // ------------------------------------------------------
+  // KROK 2: PRZYGOTOWANIE REFERENCJI
+  // ------------------------------------------------------
+  const char* REF_FILE = "/reference.jpg";
+
+  // Czyścimy RAM (symulacja startu od zera dla każdej klatki)
+  if (prev_gray) {
+    heap_caps_free(prev_gray);
+    prev_gray = nullptr;
+  }
+
+  bool ref_exists = SD.exists(REF_FILE);
+
+  // ------------------------------------------------------
+  // KROK 3: DECYZJA (TRYB FULL vs TRYB GOP)
+  // ------------------------------------------------------
   
-  // JEŚLI (tryb tylko pełne zdjęcia LUB to pierwszy przebieg) -> Wyślij FULL
-  if (ONLY_FULL_IMAGES_MODE || first_press) {
-    sendFullImage(pathToSend);
+  if (ONLY_FULL_IMAGES_MODE) {
+      // === SCENARIUSZ A: ZAWSZE PEŁNE ZDJĘCIA ===
+      Serial.println("[MODE] ONLY_FULL_IMAGES_MODE = true. Wysyłam FULL.");
+      sendFullImage(pathToSend);
+      
+      // W tym trybie resetujemy licznik GOP, żeby po przełączeniu trybu zaczął od 0 (Keyframe)
+      gop_frame_counter = 0; 
+
   } else {
-    // W przeciwnym razie wyślij DIFF
-    computeAndSendSparseJpegDiff(pathToSend);
+      // === SCENARIUSZ B: TRYB RÓŻNICOWY Z GOP ===
+      
+      // Sprawdzamy, czy to czas na Keyframe (reszta z dzielenia == 0)
+      bool is_keyframe = (gop_frame_counter % GOP_SIZE == 0);
+
+      Serial.printf("[GOP] Klatka %d w cyklu (GOP=%d). Keyframe: %s\n", 
+                    gop_frame_counter, GOP_SIZE, is_keyframe ? "TAK" : "NIE");
+
+      // Decyzja: Wysyłamy FULL jeśli:
+      // 1. Wypada Keyframe z licznika
+      // 2. LUB nie mamy pliku referencyjnego (np. pierwsze uruchomienie systemu)
+      if (is_keyframe || !ref_exists) {
+          
+          if (!ref_exists) Serial.println("[GOP] Brak referencji na SD -> Wymuszam FULL.");
+          else Serial.println("[GOP] Czas na odświeżenie (Keyframe) -> Wysyłam FULL.");
+          
+          sendFullImage(pathToSend);
+
+      } else {
+          // Wysyłamy DIFF (P-Frame)
+          Serial.println("[GOP] Klatka pośrednia -> Próba wysłania DIFF.");
+          
+          // Musimy załadować poprzednie zdjęcie, żeby policzyć różnicę
+          uint16_t w, h;
+          prev_gray = decodeJpegToGrayscale(REF_FILE, &w, &h);
+          
+          if (prev_gray) {
+              computeAndSendSparseJpegDiff(pathToSend);
+          } else {
+              Serial.println("[ERROR] Błąd dekodowania referencji! Fallback -> FULL.");
+              sendFullImage(pathToSend);
+          }
+      }
+
+      // Inkrementujemy licznik tylko w trybie GOP
+      gop_frame_counter++;
+      // Zabezpieczenie przed przepełnieniem inta (po wielu latach)
+      if (gop_frame_counter > 30000) gop_frame_counter = 0;
+  }
+
+  // ------------------------------------------------------
+  // KROK 4: ZAPIS STANU NA PRZYSZŁOŚĆ
+  // ------------------------------------------------------
+  // To co wysłaliśmy (pathToSend) staje się nową referencją
+  updateReferenceFile(pathToSend, REF_FILE);
+
+  // ------------------------------------------------------
+  // KROK 5: SPRZĄTANIE
+  // ------------------------------------------------------
+  if (prev_gray) {
+    heap_caps_free(prev_gray);
+    prev_gray = nullptr;
   }
 }
 

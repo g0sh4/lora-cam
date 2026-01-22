@@ -4,4 +4,11 @@
 .vscode/launch.json
 .vscode/ipch
 wyniki_testow/
+test_full_frame/
+tests_full_frame/
+tests_full_frame_from_SD/
+tests_home_cam/
 NODE_C/wyniki_testow/
+badania_monitoring_january/
+received_data/
+test1_1/
