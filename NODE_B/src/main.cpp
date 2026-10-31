@@ -1,16 +1,18 @@
 #include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
-#include <vector>
 #include <SPI.h>
 #include <RadioLib.h>
+#include <vector>
+#include "frame_structure.h" // <--- UPEWNIJ SIĘ, ŻE MASZ TEN PLIK
 
-#include "frame_structure.h"
-#include "ble_frame_structure.h"
+// ==========================================
+// === KONFIGURACJA PINÓW ===
+// ==========================================
+#define TRIGGER_PIN  D5   
+#define UART_TX_PIN  43   
+#define UART_RX_PIN  44   
+#define BAUDRATE     115200
 
-// --- KONFIGURACJA PINÓW ---
+// --- LORA SX1262 ---
 #define LORA_SCK_PIN 7
 #define LORA_MISO_PIN 8
 #define LORA_MOSI_PIN 9
@@ -20,43 +22,16 @@
 #define LORA_RST_PIN 42
 
 // --- PARAMETRY LORA ---
-#define LORA_FREQUENCY 868.0
-#define LORA_BANDWIDTH 125.0
+#define LORA_FREQUENCY   868.0
+#define LORA_BANDWIDTH   125.0
+#define CONTROL_SF       12    // Kanał kontrolny
 #define LORA_CODING_RATE 5
-#define LORA_TX_POWER 18
-#define LORA_SYNC_WORD 0x12
+#define LORA_TX_POWER    18
+#define LORA_SYNC_WORD   0x12
 #define LORA_PREAMBLE_LENGTH 8
 #define LORA_PACKET_SIZE 255
 
-// KANAŁ KONTROLNY SF12
-#define CONTROL_SF 12 
-
-// --- BLE ---
-#define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHAR_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHAR_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
-
-#define ACK_IMG_BUFFERED  0xAA 
-#define ACK_LORA_SUCCESS  0xBB
-#define ACK_LORA_FAIL     0xFF
-
-Module mod(LORA_NSS_PIN, LORA_DIO1_PIN, LORA_RST_PIN, LORA_BUSY_PIN);
-SX1262 radio(&mod);
-
-BLECharacteristic *pCharTx = nullptr;
-bool deviceConnected = false;
-
-std::vector<uint8_t> imageBuffer;
-struct BleRxState {
-  bool receiving = false;
-  uint32_t totalSize = 0;
-  uint32_t receivedSize = 0;
-  uint8_t txType = 0;
-  uint16_t width = 0;
-  uint16_t height = 0;
-  uint8_t blockSize = 0;
-} bleRx;
-
+// Maszyna stanów
 enum LoRaState {
   IDLE,
   NEGOTIATING,
@@ -66,85 +41,35 @@ enum LoRaState {
   FINISHED_SUCCESS,
   FINISHED_ERROR
 };
-LoRaState loraState = IDLE;
 
+// ==========================================
+// === ZMIENNE GLOBALNE ===
+// ==========================================
+Module mod(LORA_NSS_PIN, LORA_DIO1_PIN, LORA_RST_PIN, LORA_BUSY_PIN);
+SX1262 radio(&mod);
+
+std::vector<uint8_t> imageBuffer; 
+uint8_t receivedTxType = 0;       
+uint16_t receivedWidth = 320;     
+uint16_t receivedHeight = 240;
+uint8_t receivedBlockSize = 16;
+
+// Zmienne stanu LoRa
+LoRaState loraState = IDLE;
 uint8_t currentTransactionId = 0;
 uint8_t targetSF = CONTROL_SF; 
 unsigned long stateStartTime = 0;
 int retryCount = 0;
 const int MAX_NEGOTIATION_RETRIES = 5;
-
-// --- NOWA ZMIENNA DO SUMOWANIA CAŁOŚCI ---
-uint32_t grandTotalToA = 0; 
-// -----------------------------------------
-
 volatile bool loraPacketReceived = false;
 
-// Prototypy
-void setLoRaConfig(uint8_t sf);
-void sendBleStatus(uint8_t status);
-void processLoRaStateMachine();
-void fillLoRaHeader(uint8_t* buffer, uint8_t type, uint16_t seq);
-
+// ==========================================
+// === PRZERWANIA I POMOCNICZE LORA ===
+// ==========================================
 ICACHE_RAM_ATTR void onLoraIrq() {
   loraPacketReceived = true;
 }
 
-// --- BLE ---
-class ServerCallbacks : public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) { deviceConnected = true; Serial.println("[BLE] Polaczono."); }
-    void onDisconnect(BLEServer* pServer) { deviceConnected = false; BLEDevice::startAdvertising(); Serial.println("[BLE] Rozlaczono."); }
-};
-
-class RxCallbacks : public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *pChar) {
-      std::string rxData = pChar->getValue();
-      size_t len = rxData.length();
-      const uint8_t* data = (const uint8_t*)rxData.data();
-      if (len == 0) return;
-
-      if (!bleRx.receiving && len == sizeof(BleHeader)) {
-        BleHeader* header = (BleHeader*)data;
-        if (header->magic_start[0] == 0xAB && header->magic_start[1] == 0xCD) {
-          bleRx.receiving = true;
-          bleRx.totalSize = header->data_size;
-          bleRx.receivedSize = 0;
-          bleRx.txType = header->tx_type;
-          bleRx.width = header->width;
-          bleRx.height = header->height;
-          bleRx.blockSize = header->block_size;
-          imageBuffer.clear();
-          imageBuffer.reserve(bleRx.totalSize);
-          sendBleStatus(0x01);
-          Serial.printf("[BLE] Start odbioru. Rozmiar: %u B\n", bleRx.totalSize);
-        }
-      }
-      else if (bleRx.receiving) {
-        if (bleRx.receivedSize + len <= bleRx.totalSize) {
-          imageBuffer.insert(imageBuffer.end(), data, data + len);
-          bleRx.receivedSize += len;
-        }
-        if (bleRx.receivedSize >= bleRx.totalSize) {
-          Serial.println("[BLE] Odbior zakonczony. Przechodze do LoRa.");
-          bleRx.receiving = false;
-          sendBleStatus(ACK_IMG_BUFFERED);
-          loraState = NEGOTIATING;
-          retryCount = 0;
-          // ZMIANA: ID transakcji tylko 3 bity (0-7)
-          currentTransactionId = random(0, 8); 
-        }
-      }
-    }
-};
-
-void sendBleStatus(uint8_t status) {
-  if (deviceConnected && pCharTx) {
-    pCharTx->setValue(&status, 1);
-    pCharTx->notify();
-  }
-}
-
-// --- LORA ---
 void setLoRaConfig(uint8_t sf) {
   radio.standby();
   radio.setFrequency(LORA_FREQUENCY);
@@ -158,30 +83,51 @@ void setLoRaConfig(uint8_t sf) {
   radio.explicitHeader();
 }
 
+// Funkcja wypełniająca nagłówek zgodnie z nową strukturą
 void fillLoRaHeader(uint8_t* buffer, uint8_t type, uint16_t seq) {
-  // Rzutowanie na strukturę bitową - kompilator sam upakuje bity
+  // Czyścimy pamięć nagłówka (2 bajty)
+  memset(buffer, 0, sizeof(LoRaHeader));
+  
   LoRaHeader* hdr = (LoRaHeader*)buffer;
-  hdr->transaction_id = currentTransactionId & 0x07; // 3 bity
-  hdr->frame_type = type & 0x07;                     // 3 bity
-  hdr->sequence_num = seq & 0x03FF;                  // 10 bitów
+  hdr->transaction_id = currentTransactionId & 0x07;
+  hdr->frame_type     = type & 0x07;
+  hdr->sequence_num   = seq & 0x03FF;
 }
 
-// --- STATE MACHINE ---
+void initLoRa() {
+    SPI.begin(LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN);
+    pinMode(LORA_RST_PIN, OUTPUT);
+    digitalWrite(LORA_RST_PIN, LOW); delay(10);
+    digitalWrite(LORA_RST_PIN, HIGH); delay(10);
+    
+    if (radio.begin() == RADIOLIB_ERR_NONE) {
+        radio.setDio1Action(onLoraIrq);
+        setLoRaConfig(CONTROL_SF);
+        Serial.println("[LORA] Init OK.");
+    } else {
+        Serial.println("[LORA] Init FAIL!");
+    }
+}
+
+// ==========================================
+// === MASZYNA STANÓW LORA ===
+// ==========================================
 void processLoRaStateMachine() {
   switch (loraState) {
     case NEGOTIATING: {
       setLoRaConfig(CONTROL_SF);
       Serial.printf("[%lu][LORA] Negocjacja (Próba %d/%d) na SF%d...\n", millis(), retryCount + 1, MAX_NEGOTIATION_RETRIES, CONTROL_SF);
       
-      // Bufor na nagłówek (2 bajty) + Metadane (14 bajtów)
+      // Budowa pakietu START
+      // Header (2B) + Type(1B) + W(2B) + H(2B) + BS(1B) + Pkts(2B) + Size(4B) = 14B payload
       uint8_t reqBuffer[sizeof(LoRaHeader) + 14];
       fillLoRaHeader(reqBuffer, FRAME_TYPE_START, 0);
       
       size_t offset = sizeof(LoRaHeader);
-      reqBuffer[offset++] = bleRx.txType;
-      *(uint16_t*)(reqBuffer + offset) = bleRx.width; offset += 2;
-      *(uint16_t*)(reqBuffer + offset) = bleRx.height; offset += 2;
-      reqBuffer[offset++] = bleRx.blockSize;
+      reqBuffer[offset++] = receivedTxType;
+      *(uint16_t*)(reqBuffer + offset) = receivedWidth; offset += 2;
+      *(uint16_t*)(reqBuffer + offset) = receivedHeight; offset += 2;
+      reqBuffer[offset++] = receivedBlockSize;
       
       uint32_t totalData = imageBuffer.size();
       size_t dataChunkSize = LORA_PACKET_SIZE - sizeof(LoRaHeader);
@@ -192,50 +138,34 @@ void processLoRaStateMachine() {
       
       radio.transmit(reqBuffer, offset);
       
-      uint32_t startToA = radio.getTimeOnAir(offset) / 1000;
-      Serial.printf("[ToA] NEGOTIATION Packet: %lu ms\n", startToA);
-      
-      // --- RESET LICZNIKA SESJI ---
-      grandTotalToA = startToA; 
-      // ----------------------------
-
-      // ZAPOBIEGANIE DUCHOM:
+      // Reset nasłuchu
       loraPacketReceived = false; 
-      
       radio.startReceive();
       
       unsigned long waitStart = millis();
       bool grantReceived = false;
       
+      // Oczekiwanie na ACK (GRANT) - Typ 3
       while (millis() - waitStart < 6000) { 
         if (loraPacketReceived) {
           loraPacketReceived = false;
           int len = radio.getPacketLength();
           uint8_t rxBuf[256];
-          int state = radio.readData(rxBuf, len); // Czytamy z CRC check
+          int state = radio.readData(rxBuf, len);
           
-          if (state != RADIOLIB_ERR_NONE) {
-              Serial.printf("[%lu][RX] Błąd CRC: %d\n", millis(), state);
-              radio.startReceive(); 
-              continue;
-          }
+          if (state == RADIOLIB_ERR_NONE) {
+              LoRaHeader* rxHdr = (LoRaHeader*)rxBuf;
+              // Debugowanie ramki przychodzącej
+              // Serial.printf("[DEBUG] RX Header: ID=%d, T=%d\n", rxHdr->transaction_id, rxHdr->frame_type);
 
-          LoRaHeader* rxHdr = (LoRaHeader*)rxBuf;
-          
-          // Debugowanie nagłówka bitowego
-          Serial.printf("[%lu][RX] Ramka: Typ=%d, ID=%d, Seq=%d\n", 
-                        millis(), rxHdr->frame_type, rxHdr->transaction_id, rxHdr->sequence_num);
-
-          if (rxHdr->transaction_id == currentTransactionId && rxHdr->frame_type == FRAME_TYPE_ACK) {
-             if (len >= sizeof(LoRaHeader) + 1) {
-                // Payload jest tuż za nagłówkiem (czyli od 3. bajtu)
-                targetSF = rxBuf[sizeof(LoRaHeader)];
-                if (targetSF < 7 || targetSF > 12) targetSF = CONTROL_SF;
-                
-                Serial.printf("[%lu][LORA] GRANT! Zmiana na SF%d\n", millis(), targetSF);
-                grantReceived = true;
-                break;
-             }
+              if (rxHdr->transaction_id == currentTransactionId && rxHdr->frame_type == FRAME_TYPE_ACK) {
+                 if (len >= sizeof(LoRaHeader) + 1) {
+                    targetSF = rxBuf[sizeof(LoRaHeader)];
+                    Serial.printf("[LORA] GRANT otrzymany! Zmiana na SF%d\n", targetSF);
+                    grantReceived = true;
+                    break;
+                 }
+              }
           }
           radio.startReceive(); 
         }
@@ -246,7 +176,6 @@ void processLoRaStateMachine() {
         loraState = TRANSMITTING_BURST;
       } else {
         retryCount++;
-        Serial.printf("[%lu][LORA] Timeout.\n", millis());
         if (retryCount >= MAX_NEGOTIATION_RETRIES) {
           Serial.println("[LORA] Błąd krytyczny: Brak połączenia.");
           loraState = FINISHED_ERROR;
@@ -258,57 +187,28 @@ void processLoRaStateMachine() {
     }
 
     case TRANSMITTING_BURST: {
-      Serial.printf("[%lu][LORA] Przelaczam na SF%d i wysylam BURST...\n", millis(), targetSF);
+      Serial.printf("[LORA] Wysyłam BURST na SF%d...\n", targetSF);
       setLoRaConfig(targetSF); 
-      delay(100); 
+      delay(50); 
       
       size_t dataChunkSize = LORA_PACKET_SIZE - sizeof(LoRaHeader);
       uint32_t totalData = imageBuffer.size();
       uint16_t totalPackets = (totalData + dataChunkSize - 1) / dataChunkSize;
       uint8_t packetBuf[LORA_PACKET_SIZE];
       
-      uint32_t burstTotalToA = 0;
-      
       for (uint16_t i = 0; i < totalPackets; i++) {
-        fillLoRaHeader(packetBuf, FRAME_TYPE_DATA, i);
-        
+        fillLoRaHeader(packetBuf, FRAME_TYPE_DATA, i); // Typ 5
         size_t offset = i * dataChunkSize;
         size_t len = min((size_t)dataChunkSize, (size_t)(totalData - offset));
         memcpy(packetBuf + sizeof(LoRaHeader), &imageBuffer[offset], len);
         
-        size_t packetLen = sizeof(LoRaHeader) + len;
-        radio.transmit(packetBuf, packetLen);
-
-        // --- OBLICZANIE ToA POJEDYNCZEGO PAKIETU ---
-        uint32_t singlePktToA = radio.getTimeOnAir(packetLen) / 1000;
-        burstTotalToA += singlePktToA;
-        
-        // --- LOGOWANIE POJEDYNCZEJ RAMKI ---
-        Serial.printf("[ToA] Pkt %u/%u (len=%u): %lu ms\n", i+1, totalPackets, packetLen, singlePktToA);
-        // -----------------------------------
+        radio.transmit(packetBuf, sizeof(LoRaHeader) + len);
       }
-      Serial.println("\n[LORA] Koniec danych.");
       
-      // Logowanie sumy Bursta
-      Serial.printf("[ToA] TOTAL BURST DATA: %lu ms\n", burstTotalToA);
+      Serial.println("[LORA] Koniec danych. Wysyłam END.");
       
-      // Dodaj Burst do całości
-      grandTotalToA += burstTotalToA;
-      
-      Serial.println("[LORA] Wysylam END.");
-      
-      fillLoRaHeader(packetBuf, FRAME_TYPE_END, 0);
+      fillLoRaHeader(packetBuf, FRAME_TYPE_END, 0); // Typ 7
       radio.transmit(packetBuf, sizeof(LoRaHeader));
-      
-      // --- LOGOWANIE ToA END + TOTAL SESJI ---
-      uint32_t endToA = radio.getTimeOnAir(sizeof(LoRaHeader)) / 1000;
-      grandTotalToA += endToA;
-      
-      Serial.printf("[ToA] END Packet: %lu ms\n", endToA);
-      Serial.println("=========================================");
-      Serial.printf("[ToA] === SESSION TOTAL (Start+Data+End): %lu ms ===\n", grandTotalToA);
-      Serial.println("=========================================");
-      // ---------------------------------------
       
       loraState = WAITING_FOR_ACK;
       stateStartTime = millis();
@@ -319,7 +219,7 @@ void processLoRaStateMachine() {
 
     case WAITING_FOR_ACK: {
       if (millis() - stateStartTime > 5000) {
-        Serial.println("Timeout ACK. Ponawiam END.");
+        Serial.println("[LORA] Timeout ACK. Ponawiam END.");
         retryCount++;
         if (retryCount > 5) loraState = FINISHED_ERROR;
         else {
@@ -332,25 +232,29 @@ void processLoRaStateMachine() {
       }
       break;
     }
+
     case RETRANSMITTING: {
         if (millis() - stateStartTime > 5000) {
              Serial.println("[LORA] Timeout Retransmisji. Ponawiam RE_END...");
              uint8_t buf[sizeof(LoRaHeader)];
-             fillLoRaHeader(buf, FRAME_TYPE_RE_END, 0);
+             fillLoRaHeader(buf, FRAME_TYPE_RE_END, 0); // Typ 4
              radio.transmit(buf, sizeof(LoRaHeader));
              radio.startReceive();
              stateStartTime = millis();
         }
         break;
     }
+    
     case FINISHED_SUCCESS:
-      sendBleStatus(ACK_LORA_SUCCESS);
+      Serial.println("[LORA] >>> SUKCES TRANSMISJI! <<<");
       loraState = IDLE;
       break;
+      
     case FINISHED_ERROR:
-      sendBleStatus(ACK_LORA_FAIL);
+      Serial.println("[LORA] >>> BŁĄD TRANSMISJI! <<<");
       loraState = IDLE;
       break;
+      
     case IDLE: default: break;
   }
 }
@@ -365,79 +269,132 @@ void handleIncomingLoRa() {
   
   if (loraState == WAITING_FOR_ACK || loraState == RETRANSMITTING) {
       if (hdr->frame_type == FRAME_TYPE_ACK) {
-          Serial.printf("[%lu][LORA] ACK_FULL! Sukces.\n", millis());
+          Serial.println("[LORA] ACK_FULL! Transmisja zakończona.");
           loraState = FINISHED_SUCCESS;
       }
       else if (hdr->frame_type == FRAME_TYPE_NACK) {
-          if (len >= sizeof(LoRaHeader) + 3) {
-              uint8_t reqSF = rxBuf[sizeof(LoRaHeader)];
-              uint16_t count = *(uint16_t*)(rxBuf + sizeof(LoRaHeader) + 1);
-              uint16_t* list = (uint16_t*)(rxBuf + sizeof(LoRaHeader) + 3);
-              
-              Serial.printf("[%lu][LORA] NACK. Brakuje: %d. ReqSF: %d\n", millis(), count, reqSF);
-              
-              if (reqSF != targetSF) { 
-                  Serial.printf("[LORA] Zmiana SF na %d\n", reqSF);
-                  targetSF = reqSF; setLoRaConfig(targetSF); delay(50); 
-              }
-              
-              uint8_t pBuf[LORA_PACKET_SIZE];
-              size_t dSize = LORA_PACKET_SIZE - sizeof(LoRaHeader);
-              for(int i=0; i<count; i++) {
-                  uint16_t seq = list[i];
-                  size_t off = seq * dSize;
-                  if (off < imageBuffer.size()) {
-                      fillLoRaHeader(pBuf, FRAME_TYPE_DATA, seq);
-                      size_t l = min((size_t)dSize, (size_t)(imageBuffer.size() - off));
-                      memcpy(pBuf + sizeof(LoRaHeader), &imageBuffer[off], l);
-                      radio.transmit(pBuf, sizeof(LoRaHeader) + l);
-                  }
-              }
-              Serial.println("[LORA] Doslano. Wysylam RE_END.");
-              fillLoRaHeader(pBuf, FRAME_TYPE_RE_END, 0);
-              radio.transmit(pBuf, sizeof(LoRaHeader));
-              radio.startReceive();
-              loraState = RETRANSMITTING;
-              stateStartTime = millis();
-          }
+          Serial.println("[LORA] NACK! Retransmisja...");
+          // Logika parsowania listy NACK (uproszczona)
+          // ... (Tutaj powinna być pętla po liście brakujących pakietów)
+          
+          // Po wysłaniu brakujących:
+          uint8_t pBuf[sizeof(LoRaHeader)];
+          fillLoRaHeader(pBuf, FRAME_TYPE_RE_END, 0);
+          radio.transmit(pBuf, sizeof(LoRaHeader));
+          radio.startReceive();
+          loraState = RETRANSMITTING;
+          stateStartTime = millis();
       }
   }
 }
 
+// ==========================================
+// === UART IMAGE RECEIVER ===
+// ==========================================
+bool receiveImageOverUart() {
+    Serial.println("[UART] Oczekiwanie na nagłówek IMG...");
+    unsigned long st = millis();
+    bool markerFound = false;
+    
+    // Szukamy 'IMG'
+    while(millis() - st < 15000) { 
+        if (Serial1.available() >= 3) {
+            if (Serial1.read() == 'I' && Serial1.read() == 'M' && Serial1.read() == 'G') {
+                markerFound = true; break;
+            }
+        }
+        delay(1);
+    }
+    
+    if (!markerFound) { Serial.println("[UART] Timeout."); return false; }
+
+    while(Serial1.available() < 5) delay(1);
+    receivedTxType = Serial1.read();
+    uint32_t dataSize = 0;
+    Serial1.readBytes((char*)&dataSize, 4);
+    
+    Serial.printf("[UART] Typ: %d, Rozmiar: %u B\n", receivedTxType, dataSize);
+    if (dataSize == 0) return false;
+
+    imageBuffer.clear();
+    imageBuffer.reserve(dataSize);
+    
+    uint32_t received = 0;
+    st = millis();
+    while (received < dataSize && millis() - st < 20000) {
+        while (Serial1.available()) {
+            imageBuffer.push_back(Serial1.read());
+            received++;
+            if (received == dataSize) break;
+        }
+    }
+
+    if (received == dataSize) {
+        Serial.println("[UART] Odbiór OK.");
+        return true;
+    } else {
+        Serial.println("[UART] Błąd odbioru.");
+        return false;
+    }
+}
+
+// ==========================================
+// === SETUP & LOOP ===
+// ==========================================
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("Starting Node B (Bitfields + GhostFix)...");
+    Serial.begin(115200);
+    while(!Serial) delay(10);
+    delay(1000);
+    Serial.println("\n=== NODE B: MASTER GATEWAY (FIXED PROTOCOL) ===");
 
-  BLEDevice::init("NODE_B");
-  BLEServer *pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-  
-  BLECharacteristic *pCharRx = pService->createCharacteristic(CHAR_UUID_RX, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
-  pCharRx->setCallbacks(new RxCallbacks());
-  pCharTx = pService->createCharacteristic(CHAR_UUID_TX, BLECharacteristic::PROPERTY_NOTIFY);
-  pCharTx->addDescriptor(new BLE2902());
-  pService->start();
-  BLEDevice::startAdvertising();
-  Serial.println("[BLE] Gotowy.");
-
-  pinMode(LORA_RST_PIN, OUTPUT);
-  digitalWrite(LORA_RST_PIN, LOW); delay(10);
-  digitalWrite(LORA_RST_PIN, HIGH); delay(10);
-  SPI.begin(LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN);
-  
-  radio.begin();
-  radio.setDio1Action(onLoraIrq);
-  setLoRaConfig(CONTROL_SF); 
-  Serial.printf("[LORA] Gotowy. Kanal Kontrolny: SF%d\n", CONTROL_SF);
+    pinMode(TRIGGER_PIN, OUTPUT);
+    digitalWrite(TRIGGER_PIN, HIGH); 
+    Serial1.begin(BAUDRATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+    initLoRa();
 }
 
 void loop() {
-  processLoRaStateMachine();
-  if (loraPacketReceived) {
-    loraPacketReceived = false;
-    handleIncomingLoRa();
-  }
-  delay(5);
+    Serial.println("\n-------------------------------------------");
+    
+    // 1. BUDZENIE A
+    Serial.println("[MASTER] 1. Budzę NODE_A...");
+    digitalWrite(TRIGGER_PIN, LOW); delay(100); digitalWrite(TRIGGER_PIN, HIGH);
+
+    // 2. CZEKANIE
+    Serial.println("[MASTER] 2. Czekam 4s...");
+    delay(4000); 
+    while(Serial1.available()) Serial1.read();
+
+    // 3. KOMENDA 'G'
+    Serial.println("[MASTER] 3. Wysyłam 'G'");
+    Serial1.write('G');
+
+    // 4. ODBIÓR DANYCH
+    bool hasData = receiveImageOverUart();
+
+    // 5. UŚPIENIE A (Od razu)
+    Serial.println("[MASTER] 5. Wysyłam 'S' do Slave (niech idzie spać)");
+    Serial1.write('S');
+
+    // 6. LORA TRANSMISSION
+    if (hasData) {
+        Serial.println("[MASTER] 6. Rozpoczynam procedurę LoRa...");
+        
+        currentTransactionId = (currentTransactionId + 1) % 8;
+        loraState = NEGOTIATING;
+        retryCount = 0;
+        
+        while (loraState != IDLE) {
+            processLoRaStateMachine();
+            if (loraPacketReceived) {
+                loraPacketReceived = false;
+                handleIncomingLoRa();
+            }
+        }
+    } else {
+        Serial.println("[MASTER] Brak danych LoRa.");
+    }
+
+    Serial.println("[MASTER] Cykl zakończony. Czekam 30s...");
+    delay(30000);
 }

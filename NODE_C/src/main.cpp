@@ -4,7 +4,7 @@
 #include <vector>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include "frame_structure.h" // Twój plik z definicją LoRaHeader
+#include "frame_structure.h" 
 
 // --- KONFIGURACJA SIECI WIFI ---
 const char* WIFI_SSID = "NJU_Swiatlowod_EC20";
@@ -38,7 +38,7 @@ NodeCState cState = C_IDLE;
 // --- ZMIENNE SESJI ---
 uint8_t currentTransactionId = 255;
 uint8_t currentSF = CONTROL_SF; 
-uint8_t currentTxType = 0; // <--- NOWA ZMIENNA: Przechowuje typ (1=FULL, 2=DIFF)
+uint8_t currentTxType = 0; 
 
 uint32_t expectedImageSize = 0;
 uint16_t expectedPacketCount = 0;
